@@ -1,0 +1,37 @@
+sdvr: An experimental video stream aggregator
+
+This is a work in progress: don't try to use it right now unless you're willing
+to read the source to figure out how it works. Nothing about how it works should
+be considered stable yet: a huge amount still needs to be written and rewritten
+before this will be useful. There are many bugs.
+
+POC over localhost with your webcam:
+
+	$ sudo apt install make gcc libnacl-dev ffmpeg
+	$ make -j -s
+	$ ./sdvrd &
+	$ ./sdvrc &
+	$ ./poc-ffplay
+
+Design
+------
+
+Originally, I just wanted to make a kludgey DVR to record a few cameras in my
+garage for timelapses. But I decided it would be more fun to write something
+more generally useful.
+
+The primary goal of this project is to provide an open source system that is
+able to aggregate the output from a large number of cameras, and run arbitrary
+code against every frame in real time.
+
+Cryptography
+------------
+
+The security model is inspired by OpenSSH: cameras and servers use persistent
+ECDSA keys to authenticate each other. No configuration is necessary: just like
+SSH, the keys are remembered after the first connection, and all subsequent
+connections will be protected against MITM attacks.
+
+The key exchange and authenticated encryption are implemented using Curve25519
+and xsalsa20/AESPoly1305 primitives from the NaCl library by Daniel J Bernstein.
+The implementation provides perfect forward security.

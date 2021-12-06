@@ -1,0 +1,7 @@
+sdvrc
+sdvrd
+poc-ffplay
+poc-opencv
+tests
+*.o
+*.s
