@@ -972,7 +972,7 @@ int main(int argc, char **argv)
 
 	s.bindaddr.in6.sin6_family = AF_INET6;
 	s.bindaddr.in6.sin6_addr = in6addr_any;
-	s.bindaddr.in6.sin6_port = 1337;
+	s.bindaddr.in6.sin6_port = htons(1337);
 	s.authkey = get_selfkeys();
 	s.timer_interval_us = 60000000L;
 	s.max_record_len = 4096;

@@ -2,12 +2,10 @@
 
 #include <netinet/in.h>
 #include <linux/if_packet.h>
-#include <sys/un.h>
 
 struct sockaddr_any {
 	union {
 		struct sockaddr sa;
-		struct sockaddr_un un;		// AF_UNIX
 		struct sockaddr_in6 in6;	// AF_INET6
 		struct sockaddr_in in;		// AF_INET
 		struct sockaddr_ll ll;		// AF_PACKET

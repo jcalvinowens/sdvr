@@ -42,9 +42,6 @@ unsigned sa_any_len(const struct sockaddr_any *s)
 	case AF_PACKET:
 		return sizeof(s->ll);
 
-	case AF_UNIX:
-		return sizeof(s->un);
-
 	}
 
 	fatal("Bad sockaddr family: %u\n", s->sa.sa_family);
@@ -53,7 +50,7 @@ unsigned sa_any_len(const struct sockaddr_any *s)
 int get_stream_listen(const struct sockaddr_any *sa)
 {
 	int listen_fd;
-	int v = 1;
+	int v;
 
 	listen_fd = socket(sa->sa.sa_family, SOCK_STREAM, 0);
 	if (listen_fd == -1) {
@@ -61,6 +58,11 @@ int get_stream_listen(const struct sockaddr_any *sa)
 		return -1;
 	}
 
+	v = 0;
+	if (sa->sa.sa_family == AF_INET6)
+		setsockopt(listen_fd, IPPROTO_IPV6, IPV6_V6ONLY, &v, sizeof(v));
+
+	v = 1;
 	if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &v, sizeof(v))) {
 		err("Can't set SO_REUSEADDR on socket: %m\n");
 		goto err;
@@ -155,35 +157,69 @@ void get_sock_macaddr(int sockfd, uint8_t *macaddr)
 	const struct sockaddr_ll *ll = NULL;
 	struct ifaddrs *c, *ifaddrs;
 	const char *ifname = NULL;
-	struct sockaddr_in6 addr;
+	struct sockaddr_any addr;
 	socklen_t addrlen;
 
 	addrlen = sizeof(addr);
-	if (getsockname(sockfd, &addr, &addrlen))
+	if (getsockname(sockfd, (struct sockaddr *)&addr, &addrlen))
 		fatal("Bad getsockname: %m\n");
 
 	if (addrlen > sizeof(addr))
 		fatal("Address too big\n");
 
+	BUG_ON(addr.sa.sa_family != AF_INET && addr.sa.sa_family != AF_INET6);
+
 	if (getifaddrs(&ifaddrs))
 		fatal("Bad getifaddrs: %m\n");
 
 	for (c = ifaddrs; c; c = c->ifa_next) {
-		const struct sockaddr_in6 *p = (void *)c->ifa_addr;
+		const struct sockaddr_any *p = (void *)c->ifa_addr;
+		struct in6_addr cmpaddr;
 
-		if (!p || p->sin6_family != AF_INET6)
+		if (!p)
 			continue;
 
-		if (memcmp(&p->sin6_addr, &addr.sin6_addr, 16))
-			continue;
+		switch (p->sa.sa_family) {
+		case AF_INET6:
 
-		ifname = c->ifa_name;
-		break;
+			if (addr.sa.sa_family == AF_INET)
+				break;
+
+			if (memcmp(&p->in6.sin6_addr, &addr.in6.sin6_addr, 16) == 0) {
+				ifname = c->ifa_name;
+				goto found;
+			}
+
+			break;
+
+		case AF_INET:
+
+			// Handle v4-mapped-on-v6
+			if (addr.sa.sa_family == AF_INET6) {
+				memset(&cmpaddr, 0, sizeof(cmpaddr));
+				cmpaddr.s6_addr[10] = 0xff;
+				cmpaddr.s6_addr[11] = 0xff;
+				memcpy(&cmpaddr.s6_addr[12], &p->in.sin_addr.s_addr, 4);
+				if (memcmp(&cmpaddr, &addr.in6.sin6_addr, 16) == 0) {
+					ifname = c->ifa_name;
+					goto found;
+				}
+
+				break;
+			}
+
+			if (memcmp(&p->in.sin_addr, &addr.in.sin_addr, 4) == 0) {
+				ifname = c->ifa_name;
+				goto found;
+			}
+
+			break;
+		}
 	}
 
-	if (!ifname)
-		fatal("Can't find our interface!\n");
+	fatal("Can't find our interface!\n");
 
+found:
 	for (c = ifaddrs; c; c = c->ifa_next) {
 		const struct sockaddr *p = (void *)c->ifa_addr;
 

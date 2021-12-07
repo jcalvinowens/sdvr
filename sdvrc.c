@@ -50,7 +50,7 @@ static struct sockaddr_any dstaddr = {
 	.in6 = {
 		.sin6_family = AF_INET6,
 		.sin6_addr = IN6ADDR_LOOPBACK_INIT,
-		.sin6_port = 1337,
+		.sin6_port = __builtin_bswap16(1337),
 	},
 };
 
@@ -326,18 +326,23 @@ static void parse_args(int argc, char **argv)
 
 	while (1) {
 		int i = getopt_long(argc, argv, "hd:p:r:s:f:x:i:k:u", opts, NULL);
+		char v4[strlen("::ffff:XXX.XXX.XXX.XXX") + 1];
 		char tmp[16];
 		char *w, *h;
 
 		switch (i) {
 		case 'd':
-			if (inet_pton(AF_INET6, optarg,
-				      &dstaddr.in6.sin6_addr) != 1)
-				fprintf(stderr, "Bad dst '%s'\n", optarg);
+			if (inet_pton(AF_INET6, optarg, &dstaddr.in6.sin6_addr) == 1)
+				break;
 
-			break;
+			snprintf(v4, sizeof(v4), "::ffff:%s", optarg);
+			if (inet_pton(AF_INET6, v4, &dstaddr.in6.sin6_addr) == 1)
+				break;
+
+			fatal("Bad dstaddr '%s'\n", optarg);
 		case 'p':
-			dstaddr.in6.sin6_port = atoi(optarg);
+			// The port field is at the same offset for both v4/v6
+			dstaddr.in6.sin6_port = htons(atoi(optarg));
 			break;
 		case 'r':
 			fps = atoi(optarg);
