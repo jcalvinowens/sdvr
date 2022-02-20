@@ -114,9 +114,11 @@ struct client {
 
 	pthread_mutex_t atom_lock;
 	struct client *list_next;
-	void *ring_mmap;
-	size_t ring_size;
+
 	int ring_fd;
+	void *ring_mmap;
+	uint64_t ring_size;
+	uint64_t ring_cur_offset;
 };
 
 static uint32_t tombstone_constant_u32 = UINT32_MAX;
@@ -272,6 +274,7 @@ static void ring_init(struct server *s, struct client *c)
 
 	ring = c->ring_mmap;
 	desc = &ring->desc;
+	c->ring_cur_offset = (uint64_t)0-1;
 	memcpy(desc->name, c->cdesc.name, SDVR_NAMELEN);
 	desc->pixelformat = c->cdesc.pixelformat;
 	desc->fps_numerator = c->cdesc.fps_numerator;
@@ -279,15 +282,14 @@ static void ring_init(struct server *s, struct client *c)
 	desc->width = c->cdesc.width;
 	desc->height = c->cdesc.height;
 	desc->ring_size = c->ring_size - 4096;
-	desc->frame_seq = -1;
-	desc->chunk_seq = -1;
+	desc->tail_offset = 0;
+	desc->ctr = 0;
 
 	pthread_mutex_lock(&s->ring_dir_lock);
 	dir = s->ring_dir_mmap;
-	ent = &dir->ents[dir->head.len++];
-	dir->head.seq++;
+	ent = &dir->ents[dir->desc.len++];
+	dir->desc.gen++;
 
-	memcpy(ent->client_name, c->cdesc.name, sizeof(ent->client_name));
 	memcpy(ent->shm_path, c->cdesc.name, sizeof(ent->shm_path));
 	ent->is_active = 1;
 
@@ -347,8 +349,8 @@ static void ring_read(uint8_t *out, const struct shm_ring *ring,
 		out[i] = ring->ring[off % ring->desc.ring_size];
 }
 
-static void ring_append(struct client *c, int64_t f_seq, uint64_t f_len,
-			uint64_t f_off, const uint8_t *buf, int buf_len)
+static void ring_append(struct client *c, uint32_t f_seq, uint32_t f_len,
+			uint32_t f_off, const uint8_t *buf, int buf_len)
 {
 	struct shm_ring *ring = c->ring_mmap;
 	struct shm_ring_desc *d = &ring->desc;
@@ -360,32 +362,40 @@ static void ring_append(struct client *c, int64_t f_seq, uint64_t f_len,
 	BUG_ON(f_off + buf_len > f_len);
 	BUG_ON(f_len > ring->desc.ring_size - sizeof(head));
 
-	if (f_seq > d->frame_seq) {
-		uint64_t new_head;
+	if (f_seq + 1 > d->ctr) {
+		uint64_t prev, new_head;
 
-		new_head = d->offset_next;
+		prev = c->ring_cur_offset;
+		if (c->ring_cur_offset == (uint64_t)0-1) {
+			c->ring_cur_offset = 0;
+		} else {
+			ring_read((uint8_t *)&head, ring, c->ring_cur_offset,
+				  sizeof(head));
+			c->ring_cur_offset += sizeof(head) + head.frame_len;
+		}
+
+		new_head = c->ring_cur_offset;
 		frame_begin_off = new_head + sizeof(head);
-		d->offset_next = frame_begin_off + f_len;
 
-		while (d->offset_next - d->offset_oldest > d->ring_size) {
-			ring_read((uint8_t *)&head, ring, d->offset_oldest,
+		while (frame_begin_off + f_len - d->tail_offset >= d->ring_size) {
+			ring_read((uint8_t *)&head, ring, d->tail_offset,
 				  sizeof(head));
 
-			d->offset_oldest += head.frame_len + sizeof(head);
+			d->tail_offset += head.frame_len + sizeof(head);
+			BUG_ON(d->tail_offset > new_head);
 		}
 
 		memset(&head, 0, sizeof(head));
-		head.prev_offset = d->offset_newest;
+		head.offset_prev = prev;
 		head.pts_mono_us = 0;
 		head.frame_len = f_len;
 		head.frame_seq = f_seq;
-		head.frame_chunk = 0;
-		head.chunks_done = 0;
+		head.written_len = 0;
+		head.frame_flags = 0;
 		ring_write(ring, (uint8_t *)&head, new_head, sizeof(head));
 
-		d->offset_newest = new_head;
-		d->frame_seq = f_seq;
-		futex(&ring->desc.frame_seq, FUTEX_WAKE, INT_MAX, 0, 0, 0);
+		d->ctr = f_seq + 1;
+		futex(&d->ctr, FUTEX_WAKE, INT_MAX, 0, 0, 0);
 
 		if (buf == NULL)
 			goto drop; // Stream will send desc only as record
@@ -393,19 +403,23 @@ static void ring_append(struct client *c, int64_t f_seq, uint64_t f_len,
 	} else {
 		uint64_t off;
 
+		BUG_ON(c->ring_cur_offset == (uint64_t)0-1);
 		BUG_ON(buf == NULL);
 
-		if (f_seq == d->frame_seq) {
-			frame_begin_off = d->offset_newest + sizeof(head);
+		if (f_seq + 1 == d->ctr) {
+			frame_begin_off = c->ring_cur_offset + sizeof(head);
 			goto easy;
 		}
 
-		off = d->offset_newest;
+		off = c->ring_cur_offset;
 		do {
 			ring_read((uint8_t *)&head, ring, off, sizeof(head));
-			off = head.prev_offset;
+			off = head.offset_prev;
 
-		} while (f_seq > head.frame_seq && off >= d->offset_oldest);
+			if (off == (uint64_t)0-1)
+				break;
+
+		} while (f_seq != head.frame_seq && off >= d->tail_offset);
 
 		if (f_seq != head.frame_seq)
 			goto drop;
@@ -414,9 +428,7 @@ static void ring_append(struct client *c, int64_t f_seq, uint64_t f_len,
 	}
 
 easy:
-	ring->desc.chunk_seq += 1;
 	ring_write(ring, buf, frame_begin_off + f_off, buf_len);
-	futex(&ring->desc.chunk_seq, FUTEX_WAKE, INT_MAX, NULL, NULL, 0);
 
 drop:
 	pthread_mutex_unlock(&c->atom_lock);

@@ -136,7 +136,7 @@ static void *ffplay_feeder_thread(void *arg)
 {
 	struct shm_ring_dir_ent *ent = arg;
 	int ring_fd, ffplay_pipe;
-	int32_t last_frame_seq;
+	uint32_t last_frame_seq;
 	struct shm_ring *ring;
 	uint64_t last_off;
 	void *ring_mmap;
@@ -169,26 +169,37 @@ static void *ffplay_feeder_thread(void *arg)
 	fftx = fdopen(ffplay_pipe, "wb");
 	setvbuf(fftx, NULL, _IONBF, 0);
 
-	last_frame_seq = ring->desc.frame_seq; // FIXME racy
-	last_off = ring->desc.offset_newest;
+	last_frame_seq = 0;
+	last_off = ring->desc.tail_offset;
+
 	while (!stop) {
-		int32_t f_seq = ring->desc.frame_seq;
+		uint32_t f_ctr = ring->desc.ctr;
 		struct shm_ring_head head;
 
-		if (f_seq == last_frame_seq) {
-			futex(&ring->desc.frame_seq, FUTEX_WAIT, f_seq, NULL,
+		if (f_ctr == last_frame_seq + 1) {
+			futex(&ring->desc.ctr, FUTEX_WAIT, f_ctr, NULL,
 			      NULL, 0);
 
 			continue;
 		}
 
 		ring_read((uint8_t *)&head, ring, last_off, sizeof(head));
+		if (ring->desc.tail_offset > last_off) {
+			last_off = ring->desc.tail_offset;
+			continue;
+		}
+
 		ring_read(buf, ring, last_off + sizeof(head), head.frame_len);
+		if (ring->desc.tail_offset > last_off) {
+			last_off = ring->desc.tail_offset;
+			continue;
+		}
+
 		if (fwrite(buf, 1, head.frame_len, fftx) == 0)
 			break;
 
 		last_off += head.frame_len + sizeof(head);
-		last_frame_seq += 1;
+		last_frame_seq = head.frame_seq + 1;
 	}
 
 	kill(ffpid, SIGTERM);
@@ -214,7 +225,7 @@ int main(void)
 		fatal("Can't map dir: %m\n");
 
 	dir = dir_mmap;
-	for (i = 0; i < dir->head.len; i++) {
+	for (i = 0; i < dir->desc.len; i++) {
 		struct shm_ring_dir_ent *ent = dir->ents + i;
 		pthread_t tmp;
 

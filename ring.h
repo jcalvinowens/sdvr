@@ -18,33 +18,34 @@
 
 #include <stdint.h>
 
-#define SDVR_SHM_DIR_NAME "sdvrddir"
+#define SDVR_SHM_DIR_NAME "sdvr"
 
-struct shm_ring_dir_head {
-	uint32_t seq;
+struct shm_ring_dir_desc {
+	uint32_t gen;
 	uint32_t len;
 
 } __attribute__((packed));
 
 struct shm_ring_dir_ent {
 	uint8_t is_active;
-	char client_name[127];
-	char shm_path[128];
+	char shm_path[127];
 
 } __attribute__((packed));
 
 struct shm_ring_dir {
-	struct shm_ring_dir_head head;
-	uint8_t __pad[sizeof(struct shm_ring_dir_ent)
-		      - sizeof(struct shm_ring_dir_head)];
-
-	struct shm_ring_dir_ent ents[];
+	struct shm_ring_dir_desc desc;
+	struct shm_ring_dir_ent ents[0];
 
 } __attribute__((packed));
 
+#define RING_ORDERED		((uint32_t)1 << 0)
+#define RING_RELIABLE		((uint32_t)1 << 1)
+#define RING_COMPRESSED		((uint32_t)1 << 2)
+
 struct shm_ring_desc {
-	char name[128];
 	uint8_t public_key[32];
+	char name[128];
+
 	uint32_t pixelformat;
 	uint32_t fps_numerator;
 	uint32_t fps_denominator;
@@ -53,27 +54,29 @@ struct shm_ring_desc {
 	uint32_t flags;
 	uint64_t ring_size;
 
-	uint64_t offset_next;
-	uint64_t offset_newest;
-	uint64_t offset_oldest;
-	int32_t frame_seq;
-	int32_t chunk_seq;
-
-} __attribute__((packed));
-
-struct shm_ring_head {
-	uint64_t prev_offset;
-	int64_t pts_mono_us;
-	int32_t frame_seq;
-	uint32_t frame_len;
-	uint32_t frame_chunk;
-	uint32_t chunks_done;
+	uint64_t tail_offset;
+	uint32_t ctr;
 
 } __attribute__((packed));
 
 struct shm_ring {
 	struct shm_ring_desc desc;
-	uint8_t __pad[4096 - sizeof(struct shm_ring_desc)];
 	uint8_t ring[0];
+
+} __attribute__((packed));
+
+#define FRAME_COMPLETE		((uint32_t)1 << 0)
+#define FRAME_I_FRAME		((uint32_t)1 << 1)
+#define FRAME_P_FRAME		((uint32_t)1 << 2)
+#define FRAME_B_FRAME		((uint32_t)1 << 3)
+#define FRAME_CORRUPTED		((uint32_t)1 << 4)
+
+struct shm_ring_head {
+	uint64_t offset_prev;
+	int64_t pts_mono_us;
+	uint32_t frame_seq;
+	uint32_t frame_len;
+	uint32_t written_len;
+	uint32_t frame_flags;
 
 } __attribute__((packed));
