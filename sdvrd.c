@@ -287,12 +287,18 @@ static void ring_init(struct server *s, struct client *c)
 
 	pthread_mutex_lock(&s->ring_dir_lock);
 	dir = s->ring_dir_mmap;
-	ent = &dir->ents[dir->desc.len++];
-	dir->desc.gen++;
 
+	dir->desc.gen++;
+	asm volatile ("" ::: "memory");
+
+	ent = &dir->ents[dir->desc.len++];
 	memcpy(ent->shm_path, c->cdesc.name, sizeof(ent->shm_path));
 	ent->is_active = 1;
 
+	asm volatile ("" ::: "memory");
+	dir->desc.gen++;
+
+	futex(&dir->desc.gen, FUTEX_WAKE, INT_MAX, 0, 0, 0);
 	pthread_mutex_unlock(&s->ring_dir_lock);
 }
 

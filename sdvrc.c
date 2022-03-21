@@ -295,6 +295,7 @@ static int enc_main(void)
 	v4l2_close(dev);
 	free((void *)authkeys);
 	free((void *)savedkey);
+	free((void *)remotekey);
 	return 0;
 }
 

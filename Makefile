@@ -1,13 +1,15 @@
-CC = gcc
-CCC = g++
+CC = clang
+CCC = clang++
 LDFLAGS = -lnacl -lpthread -lrt
 CFLAGS = -O2 -fno-strict-aliasing -Wall -Wextra -Wstrict-prototypes \
 	 -Wmissing-prototypes -Wmissing-declarations -Werror=implicit \
 	 -Wdeclaration-after-statement -D_GNU_SOURCE \
 	 -Wno-address-of-packed-member
+CCFLAGS = -O2 -std=c++17 -Wall -Wextra -D_GNU_SOURCE
 
 all: sdvrc sdvrd tests runtests mods
 mods: poc-ffplay
+debug debug32: CCFLAGS += -g -Og -fsanitize=address -fsanitize=undefined
 debug debug32: CFLAGS += -g -Og -fsanitize=address -fsanitize=undefined
 debug: all
 debug32: 32bit
@@ -33,7 +35,7 @@ tests: tests.o crypto.o
 	$(CC) -o $@ $^ $(CFLAGS) $(LDFLAGS)
 
 poc-ffplay: poc-ffplay.o
-	$(CC) -o $@ $^ $(CFLAGS) $(LDFLAGS)
+	$(CCC) -o $@ $^ $(CCFLAGS) $(LDFLAGS)
 
 runtests: tests
 	./tests
