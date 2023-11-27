@@ -46,7 +46,7 @@
  * The protocol is structured so that the daemon can maintain zero state for
  * DGRAM clients until the client can be authenticated.
  *
- * The padding in msg_0 exists to make the daemon an uneconomical UDP reflector:
+ * The padding in msg_0 exists to make the daemon an uneconomical reflector:
  * since the source address could be spoofed, we force the client to send more
  * data than we reply with.
  *
@@ -235,7 +235,7 @@ struct dgram_frame {
  * DGRAM video packet structure.
  *
  * Clients are multiplexed using a 32-bit "cookie" value, allowing a single UDP
- * port to serve 2^32 clients.
+ * port to serve 2^32 clients. The same scheme is used for raw ethernet frames.
  *
  * The daemon does not care what the source address is: the only requirement is
  * that during the key exchange, a reply to the source address be routed back to

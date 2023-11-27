@@ -43,6 +43,7 @@
 #include <sys/mman.h>
 #include <sys/epoll.h>
 #include <sys/syscall.h>
+#include <arpa/inet.h>
 #include <linux/futex.h>
 #include <linux/close_range.h>
 #include <linux/videodev2.h>
@@ -133,6 +134,7 @@ static_assert(SDVR_NAMELEN > HOST_NAME_MAX + 1);
 
 struct server {
 	struct sockaddr_any bindaddr;
+	int ifindex;
 	char server_name[SDVR_NAMELEN];
 	int stream_listen_fd;
 	int stream_epoll_fd;
@@ -726,13 +728,11 @@ static void do_kx(struct server *s, struct client *c, int fd,
 	rxp->record_len = SDVR_MACLEN + sizeof(struct client_setup_desc);
 }
 
-static void *dgram_receive_thread(void *arg)
+static void *dgram_receive_thread(struct server *s, int dgram_fd)
 {
 	struct mmsghdr *mmsghdrs;
-	struct server *s = arg;
-	int i, dgram_fd;
+	int i;
 
-	dgram_fd = get_dgram_bind(&s->bindaddr);
 	mmsghdrs = alloca(sizeof(*mmsghdrs) * s->dgram_mmsg_batch);
 
 	for (i = 0; i < s->dgram_mmsg_batch; i++) {
@@ -887,6 +887,27 @@ static void *dgram_receive_thread(void *arg)
 
 	close(dgram_fd);
 	return NULL;
+}
+
+static void *udp_receive_thread(void *arg)
+{
+	struct server *s = arg;
+	return dgram_receive_thread(s, get_dgram_bind(&s->bindaddr));
+}
+
+static void *ethernet_receive_thread(void *arg)
+{
+	struct server *s = arg;
+	struct sockaddr_any addr = {
+		.ll = {
+			.sll_family = AF_PACKET,
+			.sll_protocol = htons(0x1337),
+			.sll_pkttype = PACKET_HOST,
+			.sll_ifindex = s->ifindex,
+		},
+	};
+
+	return dgram_receive_thread(s, get_dgram_bind(&addr));
 }
 
 static void drain_client_stream(struct server *s, struct client *c)
@@ -1119,18 +1140,33 @@ static void parse_args(int argc, char **argv, struct server *s)
 {
 	static const struct option opts[] = {
 		{ "help", no_argument, NULL, 'h' },
-		{ "timer-interval-us", required_argument, NULL, 't' },
+		{ "listen-address", required_argument, NULL, 'l' },
+		{ "raw-interface", required_argument, NULL, 'i' },
 		{},
 	};
 
 	while (1) {
-		int i = getopt_long(argc, argv, "ht:", opts, NULL);
+		int i = getopt_long(argc, argv, "hl:i:", opts, NULL);
+		char v4[strlen("::ffff:XXX.XXX.XXX.XXX") + 1];
 
 		switch (i) {
 		case -1:
 			return;
-		case 't':
-			s->timer_interval_us = atol(optarg);
+		case 'l':
+			if (inet_pton(AF_INET6, optarg, &s->bindaddr.in6.sin6_addr) == 1)
+				break;
+
+			snprintf(v4, sizeof(v4), "::ffff:%s", optarg);
+			if (inet_pton(AF_INET6, v4, &s->bindaddr.in6.sin6_addr) == 1)
+				break;
+
+			fatal("Bad dstaddr '%s'\n", optarg);
+		case 'i':
+			s->ifindex = find_ifindex(optarg);
+
+			if (s->ifindex == -1)
+				fatal("No such interface '%s'", optarg);
+
 			break;
 		case 'h':
 			printf("Usage: %s\n", argv[0]);
@@ -1150,6 +1186,10 @@ int main(int argc, char **argv)
 	sigaction(SIGINT, &stopsig, NULL);
 
 	memset(&s, 0, sizeof(s));
+	s.bindaddr.in6.sin6_family = AF_INET6;
+	s.bindaddr.in6.sin6_addr = in6addr_any;
+	s.bindaddr.in6.sin6_port = htons(1337);
+	s.ifindex = -1;
 	parse_args(argc, argv, &s);
 
 	s.stream_epoll_fd = epoll_create(1);
@@ -1166,9 +1206,6 @@ int main(int argc, char **argv)
 		strcpy(s.server_name, "sdvr");
 	}
 
-	s.bindaddr.in6.sin6_family = AF_INET6;
-	s.bindaddr.in6.sin6_addr = in6addr_any;
-	s.bindaddr.in6.sin6_port = htons(1337);
 	s.authkey = get_selfkeys();
 	s.timer_interval_us = 60000000L;
 	s.max_record_len = 4096;
@@ -1205,12 +1242,17 @@ int main(int argc, char **argv)
 			   stream_receive_thread, &s))
 		fatal("Can't create stream thread\n");
 
-	s.dgram_rx_threads = calloc(1, sizeof(pthread_t));
-	s.nr_dgram_rx_threads = 1;
+	s.dgram_rx_threads = calloc(2, sizeof(pthread_t));
+	s.nr_dgram_rx_threads = 2;
 
 	if (pthread_create(&s.dgram_rx_threads[0], NULL,
-			   dgram_receive_thread, &s))
-		fatal("Can't create dgram thread\n");
+			   udp_receive_thread, &s))
+		fatal("Can't create udp thread\n");
+
+	if (s.ifindex != -1)
+		if (pthread_create(&s.dgram_rx_threads[1], NULL,
+				   ethernet_receive_thread, &s))
+			fatal("Can't create ethernet thread\n");
 
 	while (1)
 		sleep(INT_MAX);

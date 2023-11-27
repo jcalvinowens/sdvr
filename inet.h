@@ -22,3 +22,4 @@ int get_stream_listen_one(const struct sockaddr_any *sa);
 int get_stream_connect(const struct sockaddr_any *sa);
 
 void get_sock_macaddr(int sockfd, uint8_t *macaddr);
+int find_ifindex(const char *name);

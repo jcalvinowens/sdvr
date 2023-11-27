@@ -35,6 +35,7 @@
 #include <arpa/inet.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <linux/if_arp.h>
 #include <linux/videodev2.h>
 
 static int fps;
@@ -48,6 +49,7 @@ static sig_atomic_t stop;
 static sig_atomic_t fire = 1;
 static int sigusr_trigger;
 static int use_udp;
+static int ifindex;
 
 static struct sockaddr_any dstaddr = {
 	.in6 = {
@@ -70,7 +72,8 @@ static inline int64_t mono_us(void)
 }
 
 static void run_dgram_tx(struct v4l2_dev *dev, struct enckey *k, int fd,
-			 uint32_t cookie)
+			 uint32_t cookie, const struct sockaddr *daddr,
+			 int daddrlen)
 {
 	const struct v4l2_buffer *buf;
 	const uint32_t chunk = 1024;
@@ -108,7 +111,7 @@ static void run_dgram_tx(struct v4l2_dev *dev, struct enckey *k, int fd,
 
 			d->cookie = cookie;
 
-			if (write(fd, tmp, clen) != (signed)clen)
+			if (sendto(fd, tmp, clen, 0, daddr, daddrlen) != (signed)clen)
 				fatal("Bad write: %m\n");
 		}
 
@@ -309,6 +312,8 @@ static int enc_main_dgram(void)
 	struct kx_dgram m3;
 	struct client_setup_dgram msetup;
 	struct server_setup_dgram mssetup;
+	const struct sockaddr *daddr;
+	socklen_t daddrlen;
 	uint32_t cookie;
 	int fd;
 
@@ -317,9 +322,20 @@ static int enc_main_dgram(void)
 		fatal("Can't connect: %m\n");
 
 	dev = v4l2_open(device_path, *(uint32_t *)fmt, fps, width, height);
-
 	v4l2_get_setup(dev, &setup);
-	get_sock_macaddr(fd, macaddr);
+
+	if (dstaddr.sa.sa_family == AF_PACKET) {
+		memcpy(macaddr, dstaddr.ll.sll_addr, 8);
+		daddr = (const struct sockaddr *)&dstaddr.ll;
+		daddrlen = sizeof(dstaddr.ll);
+		dstaddr.ll.sll_ifindex = ifindex;
+		dstaddr.ll.sll_hatype = ARPHRD_ETHER;
+	} else {
+		daddr = NULL;
+		daddrlen = 0;
+		get_sock_macaddr(fd, macaddr);
+	}
+
 	snprintf(setup.name, sizeof(setup.name),
 		 "%s@%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx",
 		 get_dev_businfo(dev), macaddr[0], macaddr[1], macaddr[2],
@@ -331,7 +347,7 @@ static int enc_main_dgram(void)
 		struct pollfd pfd;
 		int ret;
 
-		ret = write(fd, &m0, sizeof(uint32_t) + sizeof(m0.m0));
+		ret = sendto(fd, &m0, sizeof(uint32_t) + sizeof(m0.m0), 0, daddr, daddrlen);
 		if (ret != sizeof(uint32_t) + sizeof(m0.m0))
 			fatal("Can't write HELLO?\n");
 
@@ -371,7 +387,7 @@ static int enc_main_dgram(void)
 		struct pollfd pfd;
 		int ret;
 
-		ret = write(fd, &m2, sizeof(uint32_t) + sizeof(m2.m2));
+		ret = sendto(fd, &m2, sizeof(uint32_t) + sizeof(m2.m2), 0, daddr, daddrlen);
 		if (ret != sizeof(uint32_t) + sizeof(m2.m2))
 			fatal("Can't write HELLO?\n");
 
@@ -411,7 +427,7 @@ static int enc_main_dgram(void)
 		struct pollfd pfd;
 		int ret;
 
-		ret = write(fd, &msetup, sizeof(msetup));
+		ret = sendto(fd, &msetup, sizeof(msetup), 0, daddr, daddrlen);
 		if (ret != sizeof(msetup))
 			fatal("Can't write setup?\n");
 
@@ -447,7 +463,7 @@ static int enc_main_dgram(void)
 	if (savedkey && pk_cmp(enckey, savedkey))
 		fatal("Server key changed!\n");
 
-	run_dgram_tx(dev, enckey, fd, cookie);
+	run_dgram_tx(dev, enckey, fd, cookie, daddr, daddrlen);
 
 	close(fd);
 	free(enckey);
@@ -478,6 +494,17 @@ static const struct sigaction triggersig = {
 	.sa_handler = trigger,
 };
 
+static int parse_mac(const char *n, struct sockaddr_ll *ll)
+{
+	ll->sll_family = AF_PACKET;
+	ll->sll_protocol = htons(0x1337);
+	ll->sll_halen = 6;
+	return sscanf(n,
+	       "%02hhx:%02hhx:%02hhx:%02hhx:%02hhx:%02hhx",
+	       &ll->sll_addr[0], &ll->sll_addr[1], &ll->sll_addr[2],
+	       &ll->sll_addr[3], &ll->sll_addr[4], &ll->sll_addr[5]) == 6;
+}
+
 static void parse_args(int argc, char **argv)
 {
 	static const struct option opts[] = {
@@ -496,7 +523,7 @@ static void parse_args(int argc, char **argv)
 	};
 
 	while (1) {
-		int i = getopt_long(argc, argv, "hd:p:r:s:f:x:i:k:ut", opts, NULL);
+		int i = getopt_long(argc, argv, "hd:p:r:s:f:x:i:k:uto:", opts, NULL);
 		char v4[strlen("::ffff:XXX.XXX.XXX.XXX") + 1];
 		char tmp[16];
 		char *w, *h;
@@ -508,6 +535,9 @@ static void parse_args(int argc, char **argv)
 
 			snprintf(v4, sizeof(v4), "::ffff:%s", optarg);
 			if (inet_pton(AF_INET6, v4, &dstaddr.in6.sin6_addr) == 1)
+				break;
+
+			if (parse_mac(optarg, &dstaddr.ll))
 				break;
 
 			fatal("Bad dstaddr '%s'\n", optarg);
@@ -551,11 +581,19 @@ static void parse_args(int argc, char **argv)
 		case 't':
 			sigusr_trigger = 1;
 			break;
+		case 'o':
+			ifindex = find_ifindex(optarg);
+			if (ifindex == -1)
+				fatal("No such interface '%s'", optarg);
+
+			break;
+
 		case -1:
 			return;
 		case 'h':
 			printf("Usage: %s [-f CCCC -s WxH] [-r fps] [-x drop] "
-			       "[-d dstaddr] [-p dstport] [-u] [-t] [-i dev]\n",
+			       "[-d dstaddr] [-o out_intrface] [-p dstport] "
+			       "[-u] [-t] [-i dev]\n",
 			       argv[0]);
 			exit(0);
 		default:

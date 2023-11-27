@@ -10,7 +10,7 @@ SDVR is intended to be "secure by default": servers and clients mutually
 authenticate each other using persistent ECDSA keys (like SSH), and all data
 exchanged is encrypted. No user configuration is required, it "just works".
 
-Both TCP and UDP transport protocols are supported.
+SDVR supports streaming video over TCP, UDP, and raw ethernet frames.
 
 Proof of concept over localhost with your webcam:
 
@@ -19,6 +19,14 @@ Proof of concept over localhost with your webcam:
 	$ ./sdvrd &
 	$ ./psdl &
 	$ ./sdvrc
+
+To use the raw ethernet support, specify the inbound interface on the server:
+
+	$ sudo ./sdvrd -i enp7s0
+
+...and provide both the outbound interface and destination MAC on the client:
+
+	$ sudo ./sdvrc -u -d 80:61:5f:08:b2:ba -o enxac7f3ee6b3be
 
 This is still a work in progress, and parts of it are very messy.
 

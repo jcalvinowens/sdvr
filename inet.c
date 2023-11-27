@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <ifaddrs.h>
@@ -28,6 +29,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <net/ethernet.h>
+#include <net/if.h>
 #include <linux/if_packet.h>
 
 unsigned sa_any_len(const struct sockaddr_any *s)
@@ -123,9 +125,13 @@ int get_dgram_connect(const struct sockaddr_any *sa)
 {
 	int fd;
 
-	fd = socket(sa->sa.sa_family, SOCK_DGRAM, 0);
+	fd = socket(sa->sa.sa_family, SOCK_DGRAM,
+		    sa->sa.sa_family == AF_PACKET ? sa->ll.sll_protocol : 0);
 	if (fd == -1)
 		fatal("Can't get dgram socket: %m\n");
+
+	if (sa->sa.sa_family == AF_PACKET)
+		return fd;
 
 	if (connect(fd, (const struct sockaddr *)sa, sa_any_len(sa)))
 		fatal("Can't connect: %m\n");
@@ -139,7 +145,8 @@ int get_dgram_bind(const struct sockaddr_any *sa)
 	int v = 1;
 	int fd;
 
-	fd = socket(sa->sa.sa_family, SOCK_DGRAM, 0);
+	fd = socket(sa->sa.sa_family, SOCK_DGRAM,
+		    sa->sa.sa_family == AF_PACKET ? sa->ll.sll_protocol : 0);
 	if (fd == -1)
 		fatal("Can't get listen socket: %m\n");
 
@@ -241,4 +248,29 @@ found:
 	memcpy(macaddr, ll->sll_addr, 8);
 out:
 	freeifaddrs(ifaddrs);
+}
+
+int find_ifindex(const char *name)
+{
+	int fd, i, nr = -1;
+
+	fd = socket(AF_PACKET, SOCK_DGRAM, htons(1337));
+	if (fd == -1)
+		return -1;
+
+	for (i = 1; i < 32; i++) {
+		struct ifreq ifreq;
+
+		ifreq.ifr_ifindex = i;
+		if (ioctl(fd, SIOCGIFNAME, &ifreq))
+			continue;
+
+		if (!strcmp(ifreq.ifr_name, name)) {
+			nr = i;
+			break;
+		}
+	}
+
+	close(fd);
+	return nr;
 }
