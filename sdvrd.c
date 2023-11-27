@@ -146,8 +146,10 @@ struct server {
 
 	pthread_t *stream_rx_threads;
 	int nr_stream_rx_threads;
-	pthread_t *dgram_rx_threads;
-	int nr_dgram_rx_threads;
+	pthread_t *udp_rx_threads;
+	int nr_udp_rx_threads;
+	pthread_t *ethernet_rx_threads;
+	int nr_ethernet_rx_threads;
 	pthread_t timer_thread;
 
 	const struct authkeypair *authkey;
@@ -1165,6 +1167,7 @@ static void parse_args(int argc, char **argv, struct server *s)
 int main(int argc, char **argv)
 {
 	struct server s;
+	int i, nr_cpus;
 
 	rcu_register_thread();
 	sigaction(SIGPIPE, &ignoresig, NULL);
@@ -1224,24 +1227,34 @@ int main(int argc, char **argv)
 	if (pthread_create(&s.timer_thread, NULL, timer_thread, &s))
 		fatal("Can't create dgram thread\n");
 
-	s.stream_rx_threads = calloc(1, sizeof(pthread_t));
-	s.nr_stream_rx_threads = 1;
+	nr_cpus = 1; //sysconf(_SC_NPROCESSORS_ONLN);
+	if (nr_cpus == -1) {
+		err("Can't get NPROCESSORS, assuming uniprocessor\n");
+		nr_cpus = 1;
+	}
 
-	if (pthread_create(&s.stream_rx_threads[0], NULL,
-			   stream_receive_thread, &s))
-		fatal("Can't create stream thread\n");
+	s.stream_rx_threads = calloc(nr_cpus, sizeof(pthread_t));
+	s.udp_rx_threads = calloc(nr_cpus, sizeof(pthread_t));
+	s.ethernet_rx_threads = calloc(nr_cpus, sizeof(pthread_t));
 
-	s.dgram_rx_threads = calloc(2, sizeof(pthread_t));
-	s.nr_dgram_rx_threads = 2;
+	s.nr_stream_rx_threads = nr_cpus;
+	s.nr_udp_rx_threads = nr_cpus;
+	s.nr_ethernet_rx_threads = nr_cpus;
 
-	if (pthread_create(&s.dgram_rx_threads[0], NULL,
-			   udp_receive_thread, &s))
-		fatal("Can't create udp thread\n");
+	for (i = 0; i < nr_cpus; i++) {
+		if (pthread_create(&s.stream_rx_threads[i], NULL,
+				   stream_receive_thread, &s))
+			fatal("Can't make stream thread\n");
 
-	if (s.ifindex != -1)
-		if (pthread_create(&s.dgram_rx_threads[1], NULL,
-				   ethernet_receive_thread, &s))
-			fatal("Can't create ethernet thread\n");
+		if (pthread_create(&s.udp_rx_threads[i], NULL,
+				   udp_receive_thread, &s))
+			fatal("Can't make stream thread\n");
+
+		if (s.ifindex != -1)
+			if (pthread_create(&s.ethernet_rx_threads[i], NULL,
+					   ethernet_receive_thread, &s))
+				fatal("Can't make stream thread\n");
+	}
 
 	rcu_thread_offline();
 	while (1)
