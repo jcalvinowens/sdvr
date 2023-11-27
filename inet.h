@@ -1,5 +1,6 @@
 #pragma once
 
+#include <sys/socket.h>
 #include <netinet/in.h>
 #include <linux/if_packet.h>
 
@@ -12,7 +13,7 @@ struct sockaddr_any {
 	};
 };
 
-unsigned sa_any_len(const struct sockaddr_any *s);
+socklen_t sa_any_len(const struct sockaddr_any *s);
 int sa_any_cmp(const struct sockaddr_any *a, const struct sockaddr_any *b);
 
 int get_dgram_bind(const struct sockaddr_any *sa);

@@ -26,12 +26,5 @@
 
 #define BUG_ON(c) do { if (__builtin_expect(c, 0)) fatal(#c "\n"); } while (0)
 
-#ifdef DEBUG
-#define dbg(...) do { log(__VA_ARGS__); } while (0)
-#else
-#define dbg(...) do {} while (0)
-#endif
-
 #define static_assert(expr, ...) __static_assert(expr, ##__VA_ARGS__, #expr)
 #define __static_assert(expr, msg, ...) _Static_assert(expr, msg)
-

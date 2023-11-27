@@ -45,7 +45,6 @@
 #include <sys/syscall.h>
 #include <arpa/inet.h>
 #include <linux/futex.h>
-#include <linux/close_range.h>
 #include <linux/videodev2.h>
 
 #define futex(...) syscall(SYS_futex, __VA_ARGS__)

@@ -32,7 +32,6 @@
 #include <getopt.h>
 #include <unistd.h>
 #include <poll.h>
-#include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/stat.h>
 #include <sys/types.h>

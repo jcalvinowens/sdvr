@@ -32,7 +32,7 @@
 #include <net/if.h>
 #include <linux/if_packet.h>
 
-unsigned sa_any_len(const struct sockaddr_any *s)
+socklen_t sa_any_len(const struct sockaddr_any *s)
 {
 	switch (s->sa.sa_family) {
 	case AF_INET6:
