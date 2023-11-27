@@ -129,9 +129,11 @@ struct client {
 static uint32_t tombstone_constant_u32 = UINT32_MAX;
 static void *const tombstone_constant = &tombstone_constant_u32;
 static_assert(__builtin_offsetof(struct client, cookie) == 0);
+static_assert(SDVR_NAMELEN > HOST_NAME_MAX + 1);
 
 struct server {
 	struct sockaddr_any bindaddr;
+	char server_name[SDVR_NAMELEN];
 	int stream_listen_fd;
 	int stream_epoll_fd;
 	int stop;
@@ -302,10 +304,9 @@ static void ring_init(struct server *s, struct client *c)
 	pthread_mutex_unlock(&s->ring_dir_lock);
 }
 
-static struct client *create_client(struct server *s, bool is_stream, int fd)
+static struct client *create_client(struct server *s, bool is_stream)
 {
 	struct client *c, **p;
-	uint8_t macaddr[8];
 
 	c = calloc(1, sizeof(*c));
 	if (!c)
@@ -317,21 +318,14 @@ static struct client *create_client(struct server *s, bool is_stream, int fd)
 					s->max_record_len);
 
 	pthread_mutex_init(&c->atom_lock, NULL);
-
-	get_sock_macaddr(fd, macaddr);
-	snprintf(c->sdesc.name, sizeof(c->sdesc.name),
-		"%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx",
-		macaddr[0], macaddr[1], macaddr[2], macaddr[3], macaddr[4],
-		macaddr[5], macaddr[6], macaddr[7]);
+	strcpy(c->sdesc.name, s->server_name);
 
 	pthread_rwlock_wrlock(&s->cookie_lookup_rwlock);
-
 	s->cookie_htable_load++;
 	c->cookie = s->next_cookie++;
 	p = __lookup_client(s->cookie_htable, s->cookie_htable_size, c->cookie);
 	BUG_ON(*p != NULL);
 	*p = c;
-
 	pthread_rwlock_unlock(&s->cookie_lookup_rwlock);
 
 	return c;
@@ -809,7 +803,7 @@ static void *dgram_receive_thread(void *arg)
 
 				// FIXME handle duplicate kx_msg_2
 
-				new = create_client(s, false, dgram_fd);
+				new = create_client(s, false);
 				if (!new) {
 					err("No memory for new client!\n");
 					continue;
@@ -969,7 +963,7 @@ static void accept_new_connections(struct server *s, int listen_fd)
 			continue;
 		}
 
-		new = create_client(s, true, newsock);
+		new = create_client(s, true);
 		if (!new) {
 			err("No memory for client\n");
 			close(newsock);
@@ -1166,6 +1160,11 @@ int main(int argc, char **argv)
 	s.cookie_htable = calloc(sizeof(struct client *), 1024);
 	if (!s.cookie_htable)
 		fatal("Can't allocate cookie htable\n");
+
+	if (gethostname(s.server_name, sizeof(s.server_name))) {
+		err("Can't get hostname... using 'sdvr'\n");
+		strcpy(s.server_name, "sdvr");
+	}
 
 	s.bindaddr.in6.sin6_family = AF_INET6;
 	s.bindaddr.in6.sin6_addr = in6addr_any;
