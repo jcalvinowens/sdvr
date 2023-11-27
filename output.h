@@ -502,6 +502,14 @@ private:
 			if (forking_) {
 				auto it = fork_map_.find(path);
 
+				/*
+				 * This allows libsdl2 to render streams in
+				 * parallel, the objective being to be lazy and
+				 * not write a unified renderer thread (not
+				 * increase performance). It should not be used
+				 * for anything else.
+				 */
+
 				if (!ent->is_active) {
 					if (it == fork_map_.end())
 						continue;
@@ -513,8 +521,6 @@ private:
 
 				if (it == fork_map_.end()) {
 					pid_t pid = fork();
-					sigset_t set;
-					int num;
 
 					if (pid == -1)
 						continue;
@@ -524,15 +530,12 @@ private:
 						continue;
 					}
 
-					sigemptyset(&set);
-					sigaddset(&set, SIGTERM);
-					sigprocmask(SIG_BLOCK, &set, nullptr);
-
 					try {
 						T newobj(path);
 						newobj.start();
-						sigwait(&set, &num);
-						newobj.stop();
+						while (1)
+							;
+						//newobj.stop();
 
 					} catch (const std::exception& e) {
 						_exit(1);

@@ -168,17 +168,11 @@ public:
 
 		while (SDL_PollEvent(&evt)) {
 			switch (evt.type) {
-			case SDL_WINDOWEVENT:
-				if (evt.window.event == SDL_WINDOWEVENT_CLOSE)
-					raise(SIGTERM);
-
-				continue;
-
+			case SDL_APP_TERMINATING:
 			case SDL_QUIT:
-				raise(SIGTERM);
-
-			default:
-				continue;
+				// FIXME
+				kill(getppid(), SIGKILL);
+				raise(SIGKILL);
 			}
 		}
 	}

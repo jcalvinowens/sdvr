@@ -1,4 +1,5 @@
 sdvr: An experimental video stream aggregator
+=============================================
 
 SDVR is an open source system to aggregate the output from remote cameras, and
 run arbitrary code against every frame in real time. The goal of the project is
@@ -16,8 +17,8 @@ Proof of concept over localhost with your webcam:
 	$ sudo apt install make gcc g++ libnacl-dev libavcodec-dev libsdl2-dev
 	$ make -j -s
 	$ ./sdvrd &
-	$ ./sdvrc &
-	$ ./poc
+	$ ./psdl &
+	$ ./sdvrc
 
 This is still a work in progress, and parts of it are very messy.
 
@@ -36,9 +37,9 @@ many consumers there are: it just buffers the data. A theoretically unlimited
 number of consumers can consume a given data stream out of the same shared
 memory in real time.
 
-Currently, output.h and poc.cpp are a proof of concept that decodes non-raw
-video formats and renders them at native resolution using libsdl2. I'm going to
-fold the decoding functionality into the interface soon.
+Currently, output.h defines the C++ interface, which decodes the video. Two
+small proofs of concept derive it: psdl.cpp, which uses libsdl2 to render each
+connected video stream in its own window; and prec.cpp, which writes it to disk.
 
 Protocol
 --------
