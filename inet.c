@@ -127,7 +127,6 @@ int get_stream_listen_one(const struct sockaddr_any *sa)
 
 int get_stream_connect(const struct sockaddr_any *sa)
 {
-	int v = 1;
 	int fd;
 
 	fd = socket(sa->sa.sa_family, SOCK_STREAM, 0);
@@ -136,9 +135,6 @@ int get_stream_connect(const struct sockaddr_any *sa)
 
 	if (connect(fd, (const struct sockaddr *)sa, sa_any_len(sa)))
 		fatal("Can't connect: %m\n");
-
-	if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &v, sizeof(v)))
-		fatal("Couldn't set TCP_NODELAY on socket: %m\n");
 
 	return fd;
 }
