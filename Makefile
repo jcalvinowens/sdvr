@@ -9,8 +9,8 @@ WFLAGS = -Wall -Wextra -Wstrict-prototypes -Wmissing-prototypes -Wno-switch \
 	 -Wno-format-nonliteral -Wno-address-of-packed-member \
 	 -Wno-null-dereference
 
-LDFLAGS = -lnacl -lpthread -lrt -z noexecstack
-CFLAGS = -O2 -fno-strict-aliasing $(WFLAGS) -D_GNU_SOURCE
+LDFLAGS = -lnacl -lpthread -lrt -lurcu-qsbr -lurcu-cds -z noexecstack
+CFLAGS = -O2 -fno-strict-aliasing $(WFLAGS) -D_GNU_SOURCE -D_LGPL_SOURCE
 CCFLAGS = -O2 -std=c++17 -Wall -Wextra -D_GNU_SOURCE
 
 all: sdvrc sdvrd tests runtests mods

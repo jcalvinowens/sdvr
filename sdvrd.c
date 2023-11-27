@@ -20,6 +20,7 @@
 #include "common.h"
 #include "crypto.h"
 #include "inet.h"
+#include "jhash.h"
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -43,9 +44,16 @@
 #include <sys/mman.h>
 #include <sys/epoll.h>
 #include <sys/syscall.h>
+#include <sys/random.h>
 #include <arpa/inet.h>
+
 #include <linux/futex.h>
 #include <linux/videodev2.h>
+
+#include <urcu/urcu-qsbr.h>
+#include <urcu/map/urcu-qsbr.h>
+#include <urcu/rculfhash.h>
+#include <urcu/uatomic.h>
 
 #define futex(...) syscall(SYS_futex, __VA_ARGS__)
 
@@ -99,6 +107,8 @@ struct rxpiece {
 };
 
 struct client {
+	struct cds_lfht_node lfht_node;
+	struct rcu_head rcu;
 	uint32_t cookie;
 
 	int stream_sockfd;
@@ -109,48 +119,30 @@ struct client {
 
 	struct kx_msg_3 kxmsg;
 	struct server_setup_dgram ssmsg;
-	struct sockaddr_any lastsrc;
 	struct server_setup_desc sdesc;
 	struct client_setup_desc cdesc;
 	struct enckey *key;
 	bool rx_cdesc;
 	bool rx_vdata;
 
-	pthread_mutex_t atom_lock;
-	struct client *list_next;
-
 	int ring_fd;
 	void *ring_mmap;
 	uint64_t ring_size;
 	uint64_t ring_cur_offset;
 	uint32_t ring_cur_frame;
+	pthread_mutex_t atom_lock;
 };
 
-static uint32_t tombstone_constant_u32 = UINT32_MAX;
-static void *const tombstone_constant = &tombstone_constant_u32;
-static_assert(__builtin_offsetof(struct client, cookie) == 0);
-static_assert(SDVR_NAMELEN > HOST_NAME_MAX + 1);
-
 struct server {
-	struct sockaddr_any bindaddr;
-	int ifindex;
 	char server_name[SDVR_NAMELEN];
+	struct sockaddr_any bindaddr;
 	int stream_listen_fd;
 	int stream_epoll_fd;
+	int ifindex;
 	int stop;
 
-	pthread_rwlock_t cookie_lookup_rwlock;
-	struct client **cookie_htable;
-	int cookie_htable_size;
-	int cookie_htable_load;
+	struct cds_lfht *cookie_lfht;
 	uint32_t next_cookie;
-
-	pthread_mutex_t new_list_lock;
-	struct client *new_list;
-
-	// FIXME: Implement destruction
-	pthread_mutex_t destroy_list_lock;
-	struct client *destroy_list;
 
 	pthread_t *stream_rx_threads;
 	int nr_stream_rx_threads;
@@ -170,87 +162,59 @@ struct server {
 	int ring_dir_fd;
 };
 
-static struct client **__lookup_client(struct client **table, int table_size,
-				       uint32_t cookie)
+static uint32_t jhash32(uint32_t v)
 {
-	struct client **c;
-	int i;
-
-	i = cookie % table_size;
-	while ((c = &table[i]) && *c && (*c)->cookie != cookie)
-		i = (i + 1) % table_size;
-
-	return c;
+	return jhash(&v, sizeof(v), 0xaaaaaaaaul);
 }
 
-// FIXME: Actually handle resizing
-#if 0
-static void resize_cookie_htable(struct server *s, int new_size)
+static int lfht_match_cookie(struct cds_lfht_node *node, const void *key)
 {
-	struct client **new, **old;
-	int i, new_load;
+	const struct client *c = container_of(node, struct client, lfht_node);
+	const uint32_t *cookie = key;
 
-	new = calloc(new_size, sizeof(*new));
-	if (!new)
-		fatal("No memory to expand hashtable\n");
-
-	pthread_rwlock_wrlock(&s->cookie_lookup_rwlock);
-
-	new_load = 0;
-	for (i = 0; i < s->cookie_htable_size; i++) {
-		struct client **p;
-
-		if (!s->cookie_htable[i])
-			continue;
-
-		if (s->cookie_htable[i] == tombstone_constant)
-			continue;
-
-		new_load++;
-		p = __lookup_client(new, new_size, s->cookie_htable[i]->cookie);
-		BUG_ON(*p != NULL);
-
-		*p = s->cookie_htable[i];
-	}
-
-	old = s->cookie_htable;
-	s->cookie_htable = new;
-	s->cookie_htable_size = new_size;
-	s->cookie_htable_load = new_load;
-
-	pthread_rwlock_unlock(&s->cookie_lookup_rwlock);
-
-	free(old);
+	return c->cookie == *cookie;
 }
-#endif
 
 static struct client *lookup_client(struct server *s, uint32_t cookie)
 {
-	struct client *c;
+	struct cds_lfht_node *node;
+	struct cds_lfht_iter iter;
 
-	pthread_rwlock_rdlock(&s->cookie_lookup_rwlock);
-	c = *__lookup_client(s->cookie_htable, s->cookie_htable_size, cookie);
-	pthread_rwlock_unlock(&s->cookie_lookup_rwlock);
+	rcu_read_lock();
+	cds_lfht_lookup(s->cookie_lfht, jhash32(cookie), lfht_match_cookie,
+			&cookie, &iter);
+	node = cds_lfht_iter_get_node(&iter);
+	rcu_read_unlock();
 
-	return c;
+	if (node == NULL)
+		return NULL;
+
+	return container_of(node, struct client, lfht_node);
 }
 
-static int stop_client(struct server *s, struct client *c)
+static void destroy_client(struct rcu_head *head)
 {
-	struct client **p;
-	int ret = 0;
+	struct client *c = container_of(head, struct client, rcu);
 
-	pthread_rwlock_wrlock(&s->cookie_lookup_rwlock);
+	if (c->stream_sockfd != -1)
+		close(c->stream_sockfd);
 
-	p = __lookup_client(s->cookie_htable, s->cookie_htable_size, c->cookie);
-	if (*p) {
-		*p = tombstone_constant;
-		ret = 1;
+	free(c->key);
+	free(c);
+}
+
+static void stop_client(struct server *s, struct client *c)
+{
+	rcu_read_lock();
+
+	if (!cds_lfht_del(s->cookie_lfht, &c->lfht_node)) {
+		if (c->stream_sockfd != -1)
+			shutdown(c->stream_sockfd, SHUT_RDWR);
+
+		call_rcu(&c->rcu, destroy_client);
 	}
 
-	pthread_rwlock_unlock(&s->cookie_lookup_rwlock);
-
-	return ret;
+	rcu_read_unlock();
 }
 
 static void ring_init(struct server *s, struct client *c)
@@ -307,7 +271,7 @@ static void ring_init(struct server *s, struct client *c)
 
 static struct client *create_client(struct server *s, bool is_stream)
 {
-	struct client *c, **p;
+	struct client *c;
 
 	c = calloc(1, sizeof(*c));
 	if (!c)
@@ -318,25 +282,24 @@ static struct client *create_client(struct server *s, bool is_stream)
 		c->stream_next = calloc(1, sizeof(struct rxpiece) +
 					s->max_record_len);
 
+	/*
+	 * The values 0 and -1 are reserved for the initial key exchange.
+	 */
+again:
+	c->cookie = uatomic_add_return(&s->next_cookie, 1);
+	if (c->cookie == SDVR_COOKIE_ZEROS || c->cookie == SDVR_COOKIE_ONES)
+		goto again;
+
 	pthread_mutex_init(&c->atom_lock, NULL);
 	strcpy(c->sdesc.name, s->server_name);
+	c->stream_sockfd = -1;
 
-	pthread_rwlock_wrlock(&s->cookie_lookup_rwlock);
-	s->cookie_htable_load++;
-	c->cookie = s->next_cookie++;
-	p = __lookup_client(s->cookie_htable, s->cookie_htable_size, c->cookie);
-	BUG_ON(*p != NULL);
-	*p = c;
-	pthread_rwlock_unlock(&s->cookie_lookup_rwlock);
+	rcu_read_lock();
+	cds_lfht_add_unique(s->cookie_lfht, jhash32(c->cookie),
+			    lfht_match_cookie, &c->cookie, &c->lfht_node);
+	rcu_read_unlock();
 
 	return c;
-}
-
-static void destroy_client(struct server *s, struct client *c)
-{
-	(void)*s;
-	(void)*c;
-	// FIXME
 }
 
 static void ring_zero(struct shm_ring *ring, uint64_t off, uint64_t len)
@@ -732,6 +695,7 @@ static void *dgram_receive_thread(struct server *s, int dgram_fd)
 	struct mmsghdr *mmsghdrs;
 	int i;
 
+	rcu_register_thread();
 	mmsghdrs = alloca(sizeof(*mmsghdrs) * s->dgram_mmsg_batch);
 
 	for (i = 0; i < s->dgram_mmsg_batch; i++) {
@@ -751,8 +715,12 @@ static void *dgram_receive_thread(struct server *s, int dgram_fd)
 	}
 
 	while (!s->stop) {
-		int r = recvmmsg(dgram_fd, mmsghdrs, s->dgram_mmsg_batch,
-				 MSG_WAITFORONE, NULL);
+		int r;
+
+		rcu_thread_offline();
+		r = recvmmsg(dgram_fd, mmsghdrs, s->dgram_mmsg_batch,
+			     MSG_WAITFORONE, NULL);
+		rcu_thread_online();
 
 		if (r <= 0) {
 			err("Bad recvmmsg: %m\n");
@@ -814,7 +782,7 @@ static void *dgram_receive_thread(struct server *s, int dgram_fd)
 							   new->cookie);
 				if (!new->key) {
 					err("No memory for new key!\n");
-					destroy_client(s, new);
+					stop_client(s, new);
 					continue;
 				}
 
@@ -825,11 +793,6 @@ static void *dgram_receive_thread(struct server *s, int dgram_fd)
 				encrypt_one(new->ssmsg.text_mac,
 					    (void *)&new->ssmsg.text,
 					    sizeof(new->ssmsg.text), new->key);
-
-				pthread_mutex_lock(&s->new_list_lock);
-				new->list_next = s->new_list;
-				s->new_list = new;
-				pthread_mutex_unlock(&s->new_list_lock);
 
 				dgram_kx_msg_3(dgram_fd,
 					      mmsghdrs[i].msg_hdr.msg_name,
@@ -875,6 +838,7 @@ static void *dgram_receive_thread(struct server *s, int dgram_fd)
 
 			rxp->iovec.iov_len = mmsghdrs[i].msg_len;
 			rxp_process_dgram(c, rxp);
+			rcu_quiescent_state();
 		}
 
 		for (i = 0; i < r; i++) {
@@ -885,6 +849,7 @@ static void *dgram_receive_thread(struct server *s, int dgram_fd)
 	}
 
 	close(dgram_fd);
+	rcu_unregister_thread();
 	return NULL;
 }
 
@@ -952,8 +917,10 @@ static void drain_client_stream(struct server *s, struct client *c)
 
 static void run_timers(struct server *s)
 {
-	(void)*s;
-	return;
+	while (0) {
+		(void)*s;
+		rcu_quiescent_state();
+	}
 }
 
 static void accept_new_connections(struct server *s, int listen_fd)
@@ -1009,6 +976,8 @@ static void *stream_receive_thread(void *arg)
 	struct server *s = arg;
 	int listen_fd;
 
+	rcu_register_thread();
+
 	listen_fd = get_stream_listen(&s->bindaddr);
 	if (listen_fd == -1)
 		fatal("Can't listen: %m\n");
@@ -1025,8 +994,10 @@ static void *stream_receive_thread(void *arg)
 	while (!s->stop) {
 		int r, i;
 
+		rcu_thread_offline();
 		r = epoll_wait(s->stream_epoll_fd, evts,
 			       s->epoll_event_batch, -1);
+		rcu_thread_online();
 
 		if (r <= 0) {
 			err("Bad epoll: %m\n");
@@ -1057,10 +1028,12 @@ static void *stream_receive_thread(void *arg)
 				continue;
 
 			drain_client_stream(s, c);
+			rcu_quiescent_state();
 		}
 	}
 
 	close(listen_fd);
+	rcu_unregister_thread();
 	return NULL;
 }
 
@@ -1069,6 +1042,8 @@ static void *timer_thread(void *arg)
 	struct server *s = arg;
 	struct pollfd p;
 	int timer_fd;
+
+	rcu_register_thread();
 
 	timer_fd = new_tfd(s->timer_interval_us);
 	if (timer_fd == -1)
@@ -1080,8 +1055,10 @@ static void *timer_thread(void *arg)
 		p.events = POLLIN;
 		p.fd = timer_fd;
 
+		rcu_thread_offline();
 		if (poll(&p, 1, -1) != 1)
 			fatal("Bad poll in timer thread: %m\n");
+		rcu_thread_online();
 
 		run_timers(s);
 
@@ -1090,9 +1067,11 @@ static void *timer_thread(void *arg)
 
 		if (ticks != 1)
 			err("Lost %" PRIu64 " ticks!\n", ticks - 1);
+
 	}
 
 	close(timer_fd);
+	rcu_unregister_thread();
 	return NULL;
 }
 
@@ -1184,6 +1163,7 @@ int main(int argc, char **argv)
 {
 	struct server s;
 
+	rcu_register_thread();
 	sigaction(SIGPIPE, &ignoresig, NULL);
 	sigaction(SIGTERM, &stopsig, NULL);
 	sigaction(SIGINT, &stopsig, NULL);
@@ -1199,10 +1179,10 @@ int main(int argc, char **argv)
 	if (s.stream_epoll_fd == -1)
 		fatal("Can't make epoll instance: %m\n");
 
-	s.cookie_htable_size = 1024;
-	s.cookie_htable = calloc(sizeof(struct client *), 1024);
-	if (!s.cookie_htable)
-		fatal("Can't allocate cookie htable\n");
+	s.cookie_lfht = cds_lfht_new_flavor(64, 64, 0, CDS_LFHT_AUTO_RESIZE,
+					    &urcu_qsbr_flavor, NULL);
+	if (!s.cookie_lfht)
+		fatal("Can't make cookie rculfhash\n");
 
 	if (gethostname(s.server_name, sizeof(s.server_name))) {
 		err("Can't get hostname... using 'sdvr'\n");
@@ -1215,7 +1195,9 @@ int main(int argc, char **argv)
 	s.dgram_mmsg_batch = 64;
 	s.epoll_event_batch = 8;
 	s.listen_backlog = 1024;
-	s.next_cookie = 1;
+
+	BUG_ON(getrandom(&s.next_cookie, sizeof(s.next_cookie), 0)
+	       != sizeof(s.next_cookie));
 
 	s.ring_dir_fd = shm_open(SDVR_SHM_DIR_NAME, O_RDWR | O_CREAT, 0644);
 	if (s.ring_dir_fd == -1)
@@ -1257,8 +1239,13 @@ int main(int argc, char **argv)
 				   ethernet_receive_thread, &s))
 			fatal("Can't create ethernet thread\n");
 
+	rcu_thread_offline();
 	while (1)
 		sleep(INT_MAX);
+	rcu_thread_online();
+
+	rcu_unregister_thread();
+	return 0;
 }
 
 #if 0

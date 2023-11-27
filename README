@@ -14,7 +14,8 @@ SDVR supports streaming video over TCP, UDP, and raw ethernet frames.
 
 Proof of concept over localhost with your webcam:
 
-	$ sudo apt install make gcc g++ libnacl-dev libavcodec-dev libsdl2-dev
+	$ sudo apt install make gcc g++
+	$ sudo apt install libnacl-dev libavcodec-dev libsdl2-dev liburcu-dev
 	$ make -j -s
 	$ ./sdvrd &
 	$ ./psdl &
