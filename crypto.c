@@ -321,26 +321,33 @@ err:
 	return -1;
 }
 
-struct enckey *kx_reply(struct kx_msg_2 *m2, struct kx_msg_3 *m3,
-			const struct authkeypair *a, uint32_t cookie)
+bool kx_start_reply(struct kx_msg_2 *m2, const struct authkeypair *a)
 {
-	uint8_t their_p[crypto_scalarmult_curve25519_BYTES];
 	uint8_t their_kx_nonce[crypto_box_NONCEBYTES];
-	uint8_t our_kx_nonce[crypto_box_NONCEBYTES];
-	uint8_t *encp_tx, *encp_rx;
-	struct enckey *ret;
-
-	ret = __kx_initial(m2->pk, &m3->text.kxm);
-	if (!ret)
-		return NULL;
+	uint8_t *encp_rx;
 
 	encp_rx = (uint8_t *)&m2->text - crypto_box_ZEROBYTES;
 	memcpy(their_kx_nonce, m2->kx_nonce, sizeof(their_kx_nonce));
 	memset(encp_rx, 0, crypto_box_PADBYTES);
 	if (crypto_box_open(encp_rx, encp_rx,
 			    crypto_box_ZEROBYTES + sizeof(m2->text),
-			    their_kx_nonce, ret->remote.pk, a->sk))
-		goto err;
+			    their_kx_nonce, m2->pk, a->sk))
+		return true;
+
+	return false;
+}
+
+struct enckey *kx_finish_reply(const struct kx_msg_2 *m2, struct kx_msg_3 *m3,
+			       const struct authkeypair *a, uint32_t cookie)
+{
+	uint8_t their_p[crypto_scalarmult_curve25519_BYTES];
+	uint8_t our_kx_nonce[crypto_box_NONCEBYTES];
+	struct enckey *ret;
+	uint8_t *encp_tx;
+
+	ret = __kx_initial(m2->pk, &m3->text.kxm);
+	if (!ret)
+		return NULL;
 
 	memcpy(their_p, m2->text.kxm.kx_p, sizeof(their_p));
 	memcpy(ret->rx.nonce, m2->text.kxm.s_nonce, sizeof(ret->rx.nonce));
@@ -357,10 +364,15 @@ struct enckey *kx_reply(struct kx_msg_2 *m2, struct kx_msg_3 *m3,
 	__kx_complete(ret, their_p, true);
 	ret->kx.complete = true;
 	return ret;
+}
 
-err:
-	free(ret);
-	return NULL;
+struct enckey *kx_reply(struct kx_msg_2 *m2, struct kx_msg_3 *m3,
+			const struct authkeypair *a, uint32_t cookie)
+{
+	if (kx_start_reply(m2, a))
+		return NULL;
+
+	return kx_finish_reply(m2, m3, a, cookie);
 }
 
 static void __encrypt_one(uint8_t *b, int l, const uint8_t *n, const uint8_t *k)

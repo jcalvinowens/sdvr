@@ -1,7 +1,9 @@
 #pragma once
 
-#include <stdint.h>
 #include "proto.h"
+
+#include <stdint.h>
+#include <stdbool.h>
 
 struct authkeypair;
 struct authpubkey;
@@ -26,6 +28,10 @@ struct enckey *kx_reply(struct kx_msg_2 *m2, struct kx_msg_3 *m3,
 
 int kx_complete(struct enckey *key, const struct authkeypair *a,
 		struct kx_msg_3 *m);
+
+bool kx_start_reply(struct kx_msg_2 *m2, const struct authkeypair *a);
+struct enckey *kx_finish_reply(const struct kx_msg_2 *m2, struct kx_msg_3 *m3,
+			       const struct authkeypair *a, uint32_t cookie);
 
 uint64_t crypto_nonce_seq_tx(const struct enckey *k);
 uint64_t crypto_nonce_seq_rx(const struct enckey *k);
