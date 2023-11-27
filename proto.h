@@ -163,7 +163,8 @@ struct client_setup_desc {
 
 struct server_setup_desc {
 	char name[SDVR_NAMELEN];
-	uint16_t max_payload;
+	uint16_t max_record_len;	// Encryption unit for STREAM
+	uint16_t max_dgram_payload;	// Packet size for DGRAM
 
 } __attribute__((packed));
 

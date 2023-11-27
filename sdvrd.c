@@ -153,6 +153,7 @@ struct server {
 	const struct authkeypair *authkey;
 	int64_t timer_interval_us;
 	unsigned max_record_len;
+	unsigned max_dgram_payload;
 	int dgram_mmsg_batch;
 	int epoll_event_batch;
 	int listen_backlog;
@@ -292,6 +293,8 @@ again:
 
 	pthread_mutex_init(&c->atom_lock, NULL);
 	strcpy(c->sdesc.name, s->server_name);
+	c->sdesc.max_record_len = s->max_record_len;
+	c->sdesc.max_dgram_payload = s->max_dgram_payload;
 	c->stream_sockfd = -1;
 
 	rcu_read_lock();
@@ -807,7 +810,7 @@ static void do_one_recvmmsg(struct server *s, int fd, struct mmsghdr *mmsghdrs,
 		rxp_process_dgram(c, rxp, msg_len);
 		rcu_quiescent_state();
 
-		msg_hdr->msg_iov->iov_len = s->max_record_len;
+		msg_hdr->msg_iov->iov_len = s->max_dgram_payload;
 		msg_hdr->msg_namelen = sizeof(struct sockaddr_any);
 	}
 }
@@ -821,8 +824,9 @@ static void *dgram_receive_thread(struct server *s, int dgram_fd)
 
 	mmsghdrs = alloca(sizeof(*mmsghdrs) * s->dgram_mmsg_batch);
 	for (i = 0; i < s->dgram_mmsg_batch; i++) {
-		struct rxpiece *rxp = alloca(sizeof(*rxp) + s->max_record_len);
+		struct rxpiece *rxp;
 
+		rxp = alloca(sizeof(*rxp) + s->max_dgram_payload);
 		mmsghdrs[i] = (struct mmsghdr){
 			.msg_hdr = {
 				.msg_name = &rxp->src,
@@ -832,7 +836,7 @@ static void *dgram_receive_thread(struct server *s, int dgram_fd)
 			},
 		};
 
-		rxp->iovec.iov_len = s->max_record_len;
+		rxp->iovec.iov_len = s->max_dgram_payload;
 		rxp->iovec.iov_base = rxp->buf;
 	}
 
@@ -1191,6 +1195,7 @@ int main(int argc, char **argv)
 	s.authkey = get_selfkeys();
 	s.timer_interval_us = 60000000L;
 	s.max_record_len = 4096;
+	s.max_dgram_payload = 1024;
 	s.dgram_mmsg_batch = 64;
 	s.epoll_event_batch = 8;
 	s.listen_backlog = 1024;

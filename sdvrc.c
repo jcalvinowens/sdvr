@@ -69,10 +69,10 @@ static inline int64_t mono_us(void)
 
 static void run_dgram_tx(struct v4l2_dev *dev, struct enckey *k, int fd,
 			 uint32_t cookie, const struct sockaddr *daddr,
-			 int daddrlen)
+			 int daddrlen, unsigned max_payload)
 {
+	const uint32_t chunk = max_payload - sizeof(struct dgram);
 	const struct v4l2_buffer *buf;
-	const uint32_t chunk = 1024;
 	uint64_t ctr = 0;
 	uint8_t *tmp;
 
@@ -116,9 +116,10 @@ static void run_dgram_tx(struct v4l2_dev *dev, struct enckey *k, int fd,
 	}
 }
 
-static void run_stream_tx(struct v4l2_dev *dev, struct enckey *k, FILE *tx)
+static void run_stream_tx(struct v4l2_dev *dev, struct enckey *k, FILE *tx,
+			  unsigned max_record_len)
 {
-	const uint32_t chunk = 4096 - SDVR_MACLEN;
+	const uint32_t chunk = max_record_len - SDVR_MACLEN;
 	const struct v4l2_buffer *buf;
 	uint64_t ctr = 0;
 	uint8_t *tmp;
@@ -275,7 +276,7 @@ static int enc_main_stream(void)
 	if (savedkey && pk_cmp(enckey, savedkey))
 		fatal("Server key changed!\n");
 
-	run_stream_tx(dev, enckey, tx);
+	run_stream_tx(dev, enckey, tx, ssetup.max_record_len);
 
 	fclose(tx);
 	free(enckey);
@@ -468,7 +469,7 @@ server_setup_rx_again:
 		fatal("Server key changed!\n");
 
 	run_dgram_tx(dev, enckey, fd, cookie, &dstaddr.sa,
-		     sa_any_len(&dstaddr));
+		     sa_any_len(&dstaddr), ssetup.max_dgram_payload);
 
 	close(fd);
 	free(enckey);
