@@ -245,7 +245,24 @@ int crypto_save_pk(const struct enckey *k, const char *path)
 	return r;
 }
 
-// FIXME share more of this code
+static struct enckey *__kx_initial(const uint8_t *remote_pk,
+				   struct kx_material *kxm)
+{
+	struct enckey *ret;
+
+	ret = calloc(1, sizeof(*ret));
+	if (!ret)
+		return NULL;
+
+	memcpy(ret->remote.pk, remote_pk, sizeof(ret->remote.pk));
+	__randombytes(ret->tx.nonce, sizeof(ret->tx.nonce), 0);
+	__randombytes(ret->kx.our_n, sizeof(ret->kx.our_n), GRND_RANDOM);
+	crypto_scalarmult_curve25519_base(ret->kx.our_p, ret->kx.our_n);
+	memcpy(&kxm->kx_p, ret->kx.our_p, sizeof(kxm->kx_p));
+	memcpy(&kxm->s_nonce, ret->tx.nonce, sizeof(kxm->s_nonce));
+	return ret;
+}
+
 struct enckey *kx_begin(struct kx_msg_2 *m, const struct authkeypair *a,
 			const struct authpubkey *remote)
 {
@@ -253,20 +270,13 @@ struct enckey *kx_begin(struct kx_msg_2 *m, const struct authkeypair *a,
 	struct enckey *ret;
 	uint8_t *encp;
 
-	ret = calloc(1, sizeof(*ret));
+	ret = __kx_initial(remote->pk, &m->text.kxm);
 	if (!ret)
 		return NULL;
 
-	memcpy(ret->remote.pk, remote->pk, sizeof(ret->remote.pk));
 	__randombytes(our_kx_nonce, sizeof(our_kx_nonce), 0);
-	__randombytes(ret->tx.nonce, sizeof(ret->tx.nonce), 0);
-	__randombytes(ret->kx.our_n, sizeof(ret->kx.our_n), GRND_RANDOM);
-	crypto_scalarmult_curve25519_base(ret->kx.our_p, ret->kx.our_n);
-
 	encp = (uint8_t *)&m->text - crypto_box_ZEROBYTES;
 	memset(encp, 0, crypto_box_ZEROBYTES);
-	memcpy(&m->text.kx_p, ret->kx.our_p, sizeof(m->text.kx_p));
-	memcpy(&m->text.s_nonce, ret->tx.nonce, sizeof(m->text.s_nonce));
 	crypto_box(encp, encp, crypto_box_ZEROBYTES + sizeof(m->text),
 		   our_kx_nonce, ret->remote.pk, a->sk);
 
@@ -307,8 +317,8 @@ int kx_complete(struct enckey *key, const struct authkeypair *a,
 			    their_kx_nonce, key->remote.pk, a->sk))
 		goto err;
 
-	memcpy(key->rx.nonce, m->text.s_nonce, sizeof(key->rx.nonce));
-	memcpy(their_p, m->text.kx_p, sizeof(their_p));
+	memcpy(key->rx.nonce, m->text.kxm.s_nonce, sizeof(key->rx.nonce));
+	memcpy(their_p, m->text.kxm.kx_p, sizeof(their_p));
 	__kx_complete(key, their_p, false);
 	key->kx.complete = true;
 	return 0;
@@ -326,37 +336,31 @@ struct enckey *kx_reply(struct kx_msg_2 *m2, struct kx_msg_3 *m3,
 	uint8_t *encp_tx, *encp_rx;
 	struct enckey *ret;
 
-	ret = calloc(1, sizeof(*ret));
+	ret = __kx_initial(m2->pk, &m3->text.kxm);
 	if (!ret)
 		return NULL;
 
-	memcpy(ret->remote.pk, m2->pk, sizeof(ret->remote.pk));
-	memcpy(their_kx_nonce, m2->kx_nonce, sizeof(their_kx_nonce));
-
 	encp_rx = (uint8_t *)&m2->text - crypto_box_ZEROBYTES;
+	memcpy(their_kx_nonce, m2->kx_nonce, sizeof(their_kx_nonce));
 	memset(encp_rx, 0, crypto_box_PADBYTES);
 	if (crypto_box_open(encp_rx, encp_rx,
 			    crypto_box_ZEROBYTES + sizeof(m2->text),
 			    their_kx_nonce, ret->remote.pk, a->sk))
 		goto err;
 
-	memcpy(their_p, m2->text.kx_p, sizeof(their_p));
-	memcpy(ret->rx.nonce, m2->text.s_nonce, sizeof(ret->rx.nonce));
+	memcpy(their_p, m2->text.kxm.kx_p, sizeof(their_p));
+	memcpy(ret->rx.nonce, m2->text.kxm.s_nonce, sizeof(ret->rx.nonce));
 
 	__randombytes(our_kx_nonce, sizeof(our_kx_nonce), 0);
-	__randombytes(ret->tx.nonce, sizeof(ret->tx.nonce), 0);
-	__randombytes(ret->kx.our_n, sizeof(ret->kx.our_n), GRND_RANDOM);
-	crypto_scalarmult_curve25519_base(ret->kx.our_p, ret->kx.our_n);
-	__kx_complete(ret, their_p, true);
 
 	encp_tx = (uint8_t *)&m3->text - crypto_box_ZEROBYTES;
-	m3->text.cookie = cookie;
-	memcpy(m3->text.kx_p, ret->kx.our_p, sizeof(m3->text.kx_p));
-	memcpy(m3->text.s_nonce, ret->tx.nonce, sizeof(m3->text.s_nonce));
 	memset(encp_tx, 0, crypto_box_ZEROBYTES);
+	m3->text.cookie = cookie;
 	crypto_box(encp_tx, encp_tx, crypto_box_ZEROBYTES + sizeof(m3->text),
 		   our_kx_nonce, ret->remote.pk, a->sk);
 	memcpy(m3->kx_nonce, our_kx_nonce, sizeof(m3->kx_nonce));
+
+	__kx_complete(ret, their_p, true);
 	ret->kx.complete = true;
 	return ret;
 

@@ -50,10 +50,6 @@
  * since the source address could be spoofed, we force the client to send more
  * data than we reply with.
  *
- * It is not necessary to encrypt the ECDH material: this is sort of paranoid,
- * but it is not meaningfully more expensive than simple authentication so why
- * not do it?
- *
  * The implementation provides perfect forward security: a third party who is
  * able to record all network traffic from a client, and later compromise that
  * client and obtain its secret keys, will not be able to decrypt any of the
@@ -83,6 +79,18 @@ struct kx_msg_1 {
 } __attribute__((packed));
 
 /*
+ * BOTH DIRECTIONS
+ *
+ * ECDH key exchange material, shared between msg_2 and msg_3.
+ */
+
+struct kx_material {
+	uint8_t kx_p[SDVR_PLEN];
+	uint8_t s_nonce[SDVR_NONCELEN];
+
+} __attribute__((packed));
+
+/*
  * CLIENT -> SERVER
  *
  * If the client already knows the server PK, this may be the initial message
@@ -91,8 +99,7 @@ struct kx_msg_1 {
  */
 
 struct kx_msg_2_text {
-	uint8_t kx_p[SDVR_PLEN];
-	uint8_t s_nonce[SDVR_NONCELEN];
+	struct kx_material kxm;
 
 } __attribute__((packed));
 
@@ -112,8 +119,7 @@ struct kx_msg_2 {
  */
 
 struct kx_msg_3_text {
-	uint8_t kx_p[SDVR_PLEN];
-	uint8_t s_nonce[SDVR_NONCELEN];
+	struct kx_material kxm;
 	uint32_t cookie;
 
 } __attribute__((packed));

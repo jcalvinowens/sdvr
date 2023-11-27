@@ -21,11 +21,11 @@ const uint8_t *__pk(const struct authpubkey *p);
 struct enckey *kx_begin(struct kx_msg_2 *m, const struct authkeypair *a,
 			const struct authpubkey *remote);
 
-int kx_complete(struct enckey *key, const struct authkeypair *a,
-		struct kx_msg_3 *m);
-
 struct enckey *kx_reply(struct kx_msg_2 *m2, struct kx_msg_3 *m3,
 			const struct authkeypair *a, uint32_t cookie);
+
+int kx_complete(struct enckey *key, const struct authkeypair *a,
+		struct kx_msg_3 *m);
 
 uint64_t crypto_nonce_seq_tx(const struct enckey *k);
 uint64_t crypto_nonce_seq_rx(const struct enckey *k);
