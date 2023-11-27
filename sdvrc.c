@@ -60,11 +60,6 @@ static struct sockaddr_any dstaddr = {
 	},
 };
 
-static inline int64_t realoff_us(void)
-{
-	return 0; // FIXME
-}
-
 static inline int64_t mono_us(void)
 {
 	struct timespec t;
@@ -135,7 +130,6 @@ static void run_stream_tx(struct v4l2_dev *dev, struct enckey *k, FILE *tx)
 			.pts_mono_us =
 				v4l2_timeval_to_ns(&buf->timestamp) / 1000L,
 			.tx_mono_us = mono_us(),
-			.tx_realoff_us = realoff_us(),
 			.sequence = buf->sequence,
 			.length = buf->bytesused,
 			.chunk_size = chunk,

@@ -158,7 +158,6 @@ struct server_setup_desc {
 struct frame_desc {
 	int64_t pts_mono_us;
 	int64_t tx_mono_us;
-	int64_t tx_realoff_us;
 	uint32_t sequence;
 	uint32_t length;
 	uint32_t chunk_size;
