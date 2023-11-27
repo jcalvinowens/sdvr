@@ -15,7 +15,6 @@ struct sockaddr_any {
 unsigned sa_any_len(const struct sockaddr_any *s);
 
 int get_dgram_bind(const struct sockaddr_any *sa);
-int get_dgram_connect(const struct sockaddr_any *sa);
 
 int get_stream_listen(const struct sockaddr_any *sa);
 int get_stream_listen_one(const struct sockaddr_any *sa);

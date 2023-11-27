@@ -121,25 +121,6 @@ int get_stream_connect(const struct sockaddr_any *sa)
 	return fd;
 }
 
-int get_dgram_connect(const struct sockaddr_any *sa)
-{
-	int fd;
-
-	fd = socket(sa->sa.sa_family, SOCK_DGRAM,
-		    sa->sa.sa_family == AF_PACKET ? sa->ll.sll_protocol : 0);
-	if (fd == -1)
-		fatal("Can't get dgram socket: %m\n");
-
-	if (sa->sa.sa_family == AF_PACKET)
-		return fd;
-
-	if (connect(fd, (const struct sockaddr *)sa, sa_any_len(sa)))
-		fatal("Can't connect: %m\n");
-
-	return fd;
-}
-
-
 int get_dgram_bind(const struct sockaddr_any *sa)
 {
 	int v = 1;
@@ -245,7 +226,7 @@ found:
 	if (!ll)
 		fatal("Can't find our MAC!\n");
 
-	memcpy(macaddr, ll->sll_addr, 8);
+	memcpy(macaddr, ll->sll_addr, 6);
 out:
 	freeifaddrs(ifaddrs);
 }

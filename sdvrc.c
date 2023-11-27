@@ -49,7 +49,6 @@ static sig_atomic_t stop;
 static sig_atomic_t fire = 1;
 static int sigusr_trigger;
 static int use_udp;
-static int ifindex;
 
 static struct sockaddr_any dstaddr = {
 	.in6 = {
@@ -216,7 +215,7 @@ static int enc_main_stream(void)
 	struct client_setup_desc setup;
 	struct enckey *enckey;
 	struct v4l2_dev *dev;
-	uint8_t macaddr[8];
+	uint8_t macaddr[6];
 	struct kx_msg_2 m2;
 	struct kx_msg_3 m3;
 	uint8_t tmp[4096];
@@ -237,9 +236,9 @@ static int enc_main_stream(void)
 	v4l2_get_setup(dev, &setup);
 	get_sock_macaddr(fileno(tx), macaddr);
 	snprintf(setup.name, sizeof(setup.name),
-		 "%s@%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx",
+		 "%s@%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx",
 		 get_dev_businfo(dev), macaddr[0], macaddr[1], macaddr[2],
-		 macaddr[3], macaddr[4], macaddr[5], macaddr[6], macaddr[7]);
+		 macaddr[3], macaddr[4], macaddr[5]);
 
 	if (fread(tmp, 1, SDVR_PKLEN, rx) != SDVR_PKLEN)
 		fatal("No PK?\n");
@@ -301,45 +300,39 @@ static int enc_main_dgram(void)
 	const struct authpubkey *remotekey;
 	const struct authkeypair *authkeys;
 	const struct authpubkey *savedkey;
-	struct client_setup_desc setup;
-	struct server_setup_desc ssetup;
 	struct enckey *enckey;
 	struct v4l2_dev *dev;
-	uint8_t macaddr[8];
+	uint8_t macaddr[6];
+	uint32_t cookie;
+	int proto, fd;
+
 	struct kx_dgram m0;
 	struct kx_dgram m1;
 	struct kx_dgram m2;
 	struct kx_dgram m3;
+	struct client_setup_desc setup;
 	struct client_setup_dgram msetup;
+	struct server_setup_desc ssetup;
 	struct server_setup_dgram mssetup;
-	const struct sockaddr *daddr;
-	socklen_t daddrlen;
-	uint32_t cookie;
-	int fd;
 
-	fd = get_dgram_connect(&dstaddr);
+	proto = dstaddr.sa.sa_family == AF_PACKET ? dstaddr.ll.sll_protocol : 0;
+	fd = socket(dstaddr.sa.sa_family, SOCK_DGRAM, proto);
 	if (fd == -1)
-		fatal("Can't connect: %m\n");
+		fatal("Can't get dgram TX socket?\n");
+
+	if (dstaddr.sa.sa_family == AF_PACKET) {
+		memcpy(macaddr, dstaddr.ll.sll_addr, 6);
+	} else {
+		get_sock_macaddr(fd, macaddr);
+	}
 
 	dev = v4l2_open(device_path, *(uint32_t *)fmt, fps, width, height);
 	v4l2_get_setup(dev, &setup);
 
-	if (dstaddr.sa.sa_family == AF_PACKET) {
-		memcpy(macaddr, dstaddr.ll.sll_addr, 8);
-		daddr = (const struct sockaddr *)&dstaddr.ll;
-		daddrlen = sizeof(dstaddr.ll);
-		dstaddr.ll.sll_ifindex = ifindex;
-		dstaddr.ll.sll_hatype = ARPHRD_ETHER;
-	} else {
-		daddr = NULL;
-		daddrlen = 0;
-		get_sock_macaddr(fd, macaddr);
-	}
-
 	snprintf(setup.name, sizeof(setup.name),
-		 "%s@%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx",
+		 "%s@%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx",
 		 get_dev_businfo(dev), macaddr[0], macaddr[1], macaddr[2],
-		 macaddr[3], macaddr[4], macaddr[5], macaddr[6], macaddr[7]);
+		 macaddr[3], macaddr[4], macaddr[5]);
 
 	memset(&m0, 0, sizeof(m0));
 	m0.zeros_or_ones = SDVR_COOKIE_ZEROS;
@@ -347,7 +340,8 @@ static int enc_main_dgram(void)
 		struct pollfd pfd;
 		int ret;
 
-		ret = sendto(fd, &m0, sizeof(uint32_t) + sizeof(m0.m0), 0, daddr, daddrlen);
+		ret = sendto(fd, &m0, sizeof(uint32_t) + sizeof(m0.m0), 0,
+			     &dstaddr.sa, sa_any_len(&dstaddr));
 		if (ret != sizeof(uint32_t) + sizeof(m0.m0))
 			fatal("Can't write HELLO?\n");
 
@@ -387,7 +381,8 @@ static int enc_main_dgram(void)
 		struct pollfd pfd;
 		int ret;
 
-		ret = sendto(fd, &m2, sizeof(uint32_t) + sizeof(m2.m2), 0, daddr, daddrlen);
+		ret = sendto(fd, &m2, sizeof(uint32_t) + sizeof(m2.m2), 0,
+			     &dstaddr.sa, sa_any_len(&dstaddr));
 		if (ret != sizeof(uint32_t) + sizeof(m2.m2))
 			fatal("Can't write HELLO?\n");
 
@@ -427,7 +422,8 @@ static int enc_main_dgram(void)
 		struct pollfd pfd;
 		int ret;
 
-		ret = sendto(fd, &msetup, sizeof(msetup), 0, daddr, daddrlen);
+		ret = sendto(fd, &msetup, sizeof(msetup), 0, &dstaddr.sa,
+			     sa_any_len(&dstaddr));
 		if (ret != sizeof(msetup))
 			fatal("Can't write setup?\n");
 
@@ -463,7 +459,8 @@ static int enc_main_dgram(void)
 	if (savedkey && pk_cmp(enckey, savedkey))
 		fatal("Server key changed!\n");
 
-	run_dgram_tx(dev, enckey, fd, cookie, daddr, daddrlen);
+	run_dgram_tx(dev, enckey, fd, cookie, &dstaddr.sa,
+		     sa_any_len(&dstaddr));
 
 	close(fd);
 	free(enckey);
@@ -499,10 +496,9 @@ static int parse_mac(const char *n, struct sockaddr_ll *ll)
 	ll->sll_family = AF_PACKET;
 	ll->sll_protocol = htons(0x1337);
 	ll->sll_halen = 6;
-	return sscanf(n,
-	       "%02hhx:%02hhx:%02hhx:%02hhx:%02hhx:%02hhx",
+	return 6 == sscanf(n, "%02hhx:%02hhx:%02hhx:%02hhx:%02hhx:%02hhx",
 	       &ll->sll_addr[0], &ll->sll_addr[1], &ll->sll_addr[2],
-	       &ll->sll_addr[3], &ll->sll_addr[4], &ll->sll_addr[5]) == 6;
+	       &ll->sll_addr[3], &ll->sll_addr[4], &ll->sll_addr[5]);
 }
 
 static void parse_args(int argc, char **argv)
@@ -537,14 +533,17 @@ static void parse_args(int argc, char **argv)
 			if (inet_pton(AF_INET6, v4, &dstaddr.in6.sin6_addr) == 1)
 				break;
 
-			if (parse_mac(optarg, &dstaddr.ll))
+			if (parse_mac(optarg, &dstaddr.ll) == 1)
 				break;
 
 			fatal("Bad dstaddr '%s'\n", optarg);
 		case 'p':
-			// The port field is at the same offset for both v4/v6
-			dstaddr.in6.sin6_port = htons(atoi(optarg));
-			break;
+			if (dstaddr.sa.sa_family == AF_INET6) {
+				dstaddr.in6.sin6_port = htons(atoi(optarg));
+				break;
+			}
+
+			fatal("Port doesn't make sense for raw ethernet\n");
 		case 'r':
 			fps = atoi(optarg);
 			break;
@@ -582,18 +581,20 @@ static void parse_args(int argc, char **argv)
 			sigusr_trigger = 1;
 			break;
 		case 'o':
-			ifindex = find_ifindex(optarg);
-			if (ifindex == -1)
+			dstaddr.ll.sll_family = AF_PACKET;
+			dstaddr.ll.sll_hatype = ARPHRD_ETHER;
+			dstaddr.ll.sll_ifindex = find_ifindex(optarg);
+			if (dstaddr.ll.sll_ifindex == -1)
 				fatal("No such interface '%s'", optarg);
 
 			break;
-
 		case -1:
 			return;
 		case 'h':
-			printf("Usage: %s [-f CCCC -s WxH] [-r fps] [-x drop] "
-			       "[-d dstaddr] [-o out_intrface] [-p dstport] "
-			       "[-u] [-t] [-i dev]\n",
+			printf("Usage: %s [-u] [-t] [-i videodev] "
+			       "[-f CCCC -s WxH] [-r fps] [-x drop_every_nth] "
+			       "[-d dstaddr [-o out_intrface | -p dstport]] "
+			       "[-k keydir]\n",
 			       argv[0]);
 			exit(0);
 		default:
@@ -606,6 +607,11 @@ int main(int argc, char **argv)
 {
 	sigaction(SIGINT, &stopsig, NULL);
 	parse_args(argc, argv);
+
+	if (dstaddr.sa.sa_family == AF_PACKET) {
+		if (!(dstaddr.ll.sll_protocol && dstaddr.ll.sll_ifindex))
+			fatal("Need both -d and -o for raw ethernet");
+	}
 
 	if (sigusr_trigger)
 		sigaction(SIGUSR1, &triggersig, NULL);
