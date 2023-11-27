@@ -25,6 +25,7 @@
 #include <stdint.h>
 #include <inttypes.h>
 #include <time.h>
+#include <limits.h>
 #include <signal.h>
 #include <string.h>
 #include <errno.h>
@@ -44,6 +45,7 @@ static int height;
 static char fmt[5] = "    ";
 static unsigned frame_step = 1;
 static const char *device_path = "/dev/video0";
+static char hostname[HOST_NAME_MAX + 1];
 static const char *key_dir;
 static sig_atomic_t stop;
 static sig_atomic_t fire = 1;
@@ -215,7 +217,6 @@ static int enc_main_stream(void)
 	struct client_setup_desc setup;
 	struct enckey *enckey;
 	struct v4l2_dev *dev;
-	uint8_t macaddr[6];
 	struct kx_msg_2 m2;
 	struct kx_msg_3 m3;
 	uint8_t tmp[4096];
@@ -232,13 +233,10 @@ static int enc_main_stream(void)
 	setvbuf(rx, NULL, _IONBF, 0);
 
 	dev = v4l2_open(device_path, *(uint32_t *)fmt, fps, width, height);
-
 	v4l2_get_setup(dev, &setup);
-	get_sock_macaddr(fileno(tx), macaddr);
-	snprintf(setup.name, sizeof(setup.name),
-		 "%s@%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx",
-		 get_dev_businfo(dev), macaddr[0], macaddr[1], macaddr[2],
-		 macaddr[3], macaddr[4], macaddr[5]);
+
+	snprintf(setup.name, sizeof(setup.name), "%s@%s", get_dev_businfo(dev),
+		 hostname);
 
 	if (fread(tmp, 1, SDVR_PKLEN, rx) != SDVR_PKLEN)
 		fatal("No PK?\n");
@@ -302,7 +300,6 @@ static int enc_main_dgram(void)
 	const struct authpubkey *savedkey;
 	struct enckey *enckey;
 	struct v4l2_dev *dev;
-	uint8_t macaddr[6];
 	uint32_t cookie;
 	int proto, fd;
 
@@ -320,19 +317,11 @@ static int enc_main_dgram(void)
 	if (fd == -1)
 		fatal("Can't get dgram TX socket?\n");
 
-	if (dstaddr.sa.sa_family == AF_PACKET) {
-		memcpy(macaddr, dstaddr.ll.sll_addr, 6);
-	} else {
-		get_sock_macaddr(fd, macaddr);
-	}
-
 	dev = v4l2_open(device_path, *(uint32_t *)fmt, fps, width, height);
 	v4l2_get_setup(dev, &setup);
 
-	snprintf(setup.name, sizeof(setup.name),
-		 "%s@%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx",
-		 get_dev_businfo(dev), macaddr[0], macaddr[1], macaddr[2],
-		 macaddr[3], macaddr[4], macaddr[5]);
+	snprintf(setup.name, sizeof(setup.name), "%s@%s", get_dev_businfo(dev),
+		 hostname);
 
 	memset(&m0, 0, sizeof(m0));
 	m0.zeros_or_ones = SDVR_COOKIE_ZEROS;
@@ -515,11 +504,13 @@ static void parse_args(int argc, char **argv)
 		{ "key", required_argument, NULL, 'k' },
 		{ "udp", no_argument, NULL, 'u' },
 		{ "trigger", no_argument, NULL, 't' },
+		{ "outif", required_argument, NULL, 'o' },
+		{ "name", required_argument, NULL, 'n' },
 		{},
 	};
 
 	while (1) {
-		int i = getopt_long(argc, argv, "hd:p:r:s:f:x:i:k:uto:", opts, NULL);
+		int i = getopt_long(argc, argv, "hd:p:r:s:f:x:i:k:uto:n:", opts, NULL);
 		char v4[strlen("::ffff:XXX.XXX.XXX.XXX") + 1];
 		char tmp[16];
 		char *w, *h;
@@ -588,13 +579,16 @@ static void parse_args(int argc, char **argv)
 				fatal("No such interface '%s'", optarg);
 
 			break;
+		case 'n':
+			strncpy(hostname, optarg, sizeof(hostname) - 1);
+			break;
 		case -1:
 			return;
 		case 'h':
 			printf("Usage: %s [-u] [-t] [-i videodev] "
 			       "[-f CCCC -s WxH] [-r fps] [-x drop_every_nth] "
 			       "[-d dstaddr [-o out_intrface | -p dstport]] "
-			       "[-k keydir]\n",
+			       "[-k keydir] [-n name]\n",
 			       argv[0]);
 			exit(0);
 		default:
@@ -606,6 +600,12 @@ static void parse_args(int argc, char **argv)
 int main(int argc, char **argv)
 {
 	sigaction(SIGINT, &stopsig, NULL);
+
+	if (gethostname(hostname, sizeof(hostname))) {
+		err("No hostname, using 'sdvrc', pass a better name with -n\n");
+		strcpy(hostname, "sdvrc");
+	}
+
 	parse_args(argc, argv);
 
 	if (dstaddr.sa.sa_family == AF_PACKET) {
