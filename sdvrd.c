@@ -495,16 +495,20 @@ static int rxp_process_stream(struct server *s, struct client *c,
 
 		c->rx_cdesc = true;
 
-		if (send_server_desc(c))
-			fatal("Can't send server desc: %m\n");
+		if (send_server_desc(c)) {
+			err("Can't send server desc: %m\n");
+			return -1;
+		}
 
 		savedkey = get_clientpk(c->cdesc.name);
 		if (!savedkey)
 			if (save_clientpk(c->key, c->cdesc.name))
-				fprintf(stderr, "Can't save client key!\n");
+				err("Can't save client key!\n");
 
-		if (savedkey && pk_cmp(c->key, savedkey))
-			fatal("Client key changed!\n");
+		if (savedkey && pk_cmp(c->key, savedkey)) {
+			err("Client key changed!\n");
+			return -1;
+		}
 
 		free((void *)savedkey);
 
@@ -930,12 +934,12 @@ static void accept_new_connections(struct server *s, int listen_fd)
 		socklen_t addrlen = sizeof(srcaddr);
 		struct epoll_event evt;
 		struct client *new;
-		int newsock;
+		int newfd;
 
-		newsock = accept4(listen_fd, (void *)&srcaddr,
+		newfd = accept4(listen_fd, (void *)&srcaddr,
 				  &addrlen, SOCK_NONBLOCK);
 
-		if (newsock == -1) {
+		if (newfd == -1) {
 			if (errno == EAGAIN)
 				return;
 
@@ -944,29 +948,31 @@ static void accept_new_connections(struct server *s, int listen_fd)
 			continue;
 		}
 
-		if (send_kx_msg_1(s, newsock, NULL, 0)) {
+		if (send_kx_msg_1(s, newfd, NULL, 0)) {
 			err("Can't write PK: %m\n");
-			close(newsock);
+			close(newfd);
 			continue;
 		}
 
 		new = create_client(s, true);
 		if (!new) {
 			err("No memory for client\n");
-			close(newsock);
+			close(newfd);
 			continue;
 		}
 
 		memcpy(&new->stream_srcaddr, &srcaddr, sa_any_len(&srcaddr));
-		new->stream_sockfd = newsock;
+		new->stream_sockfd = newfd;
 
 		new->stream_next->record_len = sizeof(struct kx_msg_2);
 		new->stream_next->record_off = 0;
 
 		evt.data.u32 = new->cookie;
 		evt.events = EPOLLIN | EPOLLRDHUP | EPOLLET;
-		if (epoll_ctl(s->stream_epoll_fd, EPOLL_CTL_ADD, newsock, &evt))
-			fatal("Bad epoll_ctl: %m\n");
+		if (epoll_ctl(s->stream_epoll_fd, EPOLL_CTL_ADD, newfd, &evt)) {
+			err("Bad epoll_ctl: %m\n");
+			stop_client(s, new);
+		}
 	}
 }
 
@@ -988,7 +994,7 @@ static void *stream_receive_thread(void *arg)
 	evt.data.u32 = ACCEPT_COOKIE_MAGIC;
 	evt.events = EPOLLIN | EPOLLET;
 	if (epoll_ctl(s->stream_epoll_fd, EPOLL_CTL_ADD, listen_fd, &evt))
-		fatal("Bad epoll_ctl: %m\n");
+		fatal("Can't EPOLL_CTL_ADD listen socket: %m\n");
 
 	evts = alloca(s->epoll_event_batch * sizeof(*evts));
 	while (!s->stop) {
@@ -1000,8 +1006,10 @@ static void *stream_receive_thread(void *arg)
 		rcu_thread_online();
 
 		if (r <= 0) {
-			err("Bad epoll: %m\n");
-			continue;
+			if (errno == EINTR)
+				continue;
+
+			fatal("Bad epoll: %m\n");
 		}
 
 		for (i = 0; i < r; i++) {
@@ -1056,8 +1064,12 @@ static void *timer_thread(void *arg)
 		p.fd = timer_fd;
 
 		rcu_thread_offline();
-		if (poll(&p, 1, -1) != 1)
+		if (poll(&p, 1, -1) != 1) {
+			if (errno == EINTR)
+				continue;
+
 			fatal("Bad poll in timer thread: %m\n");
+		}
 		rcu_thread_online();
 
 		run_timers(s);
