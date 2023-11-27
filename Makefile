@@ -1,10 +1,16 @@
 CC = gcc
 CCC = g++
+
+WFLAGS = -Wall -Wextra -Wstrict-prototypes -Wmissing-prototypes -Wno-switch \
+	 -Wmissing-declarations -Werror=implicit -Wdeclaration-after-statement \
+	 -Wduplicated-cond -Wduplicated-branches -Wlogical-op -Wrestrict \
+	 -Wnull-dereference -Wjump-misses-init -Wdouble-promotion -Wshadow \
+	 -Wformat=2 -Wstrict-aliasing -Wno-unknown-warning-option \
+	 -Wno-format-nonliteral -Wno-address-of-packed-member \
+	 -Wno-null-dereference
+
 LDFLAGS = -lnacl -lpthread -lrt -z noexecstack
-CFLAGS = -O2 -fno-strict-aliasing -Wall -Wextra -Wstrict-prototypes \
-	 -Wmissing-prototypes -Wmissing-declarations -Werror=implicit \
-	 -Wdeclaration-after-statement -D_GNU_SOURCE \
-	 -Wno-address-of-packed-member
+CFLAGS = -O2 -fno-strict-aliasing $(WFLAGS) -D_GNU_SOURCE
 CCFLAGS = -O2 -std=c++17 -Wall -Wextra -D_GNU_SOURCE
 
 all: sdvrc sdvrd tests runtests mods
