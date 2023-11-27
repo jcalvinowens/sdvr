@@ -1,0 +1,67 @@
+sdvr: An experimental video stream aggregator
+
+SDVR is an open source system to aggregate the output from remote cameras, and
+run arbitrary code against every frame in real time. The goal of the project is
+to scale to both huge numbers of cameras, and huge numbers of local video data
+consumers per camera.
+
+SDVR is intended to be "secure by default": servers and clients mutually
+authenticate each other using persistent ECDSA keys (like SSH), and all data
+exchanged is encrypted. No user configuration is required, it "just works".
+
+Both TCP and UDP transport protocols are supported.
+
+Proof of concept over localhost with your webcam:
+
+	$ sudo apt install make gcc g++ libnacl-dev libavcodec-dev libsdl2-dev
+	$ make -j -s
+	$ ./sdvrd &
+	$ ./sdvrc &
+	$ ./poc
+
+This is still a work in progress, and parts of it are very messy.
+
+Design
+------
+
+SDVR has three pieces: the client, the daemon, and the consumer(s).
+
+The clients run on the systems with the camera(s) attached. Currently, only
+V4L2 on Linux is supported, with broader support being a long term goal if this
+project gains any traction.
+
+The daemon recieves the data, decrypts it, and makes it available to consumers
+locklessly via ring buffers in /dev/shm. The daemon doesn't know or care how
+many consumers there are: it just buffers the data. A theoretically unlimited
+number of consumers can consume a given data stream out of the same shared
+memory in real time.
+
+Currently, output.h and poc.cpp are a proof of concept that decodes non-raw
+video formats and renders them at native resolution using libsdl2. I'm going to
+fold the decoding functionality into the interface soon.
+
+Protocol
+--------
+
+The primary motivation for the novel protocol was to provide encryption and
+mutual authentication in a more user friendly way than SSL/TLS. Eventually, it
+will probably make sense to use a more standard container format for the video
+data itself.
+
+The video is not padded: for compressed formats, it is important to understand
+that this leaks information about the video stream.
+
+Cryptography
+------------
+
+The security model is inspired by OpenSSH: cameras and servers use persistent
+ECDSA keys to authenticate each other. No configuration is necessary: just like
+SSH, the keys are remembered after the first connection, and all subsequent
+connections will be protected against MITM attacks.
+
+The key exchange and authenticated encryption are implemented using Curve25519
+and xsalsa20/AESPoly1305 primitives from the NaCl library by Daniel J Bernstein.
+The implementation provides perfect forward security.
+
+Keydata is stored in ~/.sdvr/ for both servers and clients. Servers and clients
+can run on the same machine (over localhost), the filenames do not conflict.
