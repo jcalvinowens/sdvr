@@ -579,11 +579,21 @@ static void parse_args(int argc, char **argv)
 		case -1:
 			return;
 		case 'h':
-			printf("Usage: %s [-u] [-t] [-i videodev] "
-			       "[-f CCCC -s WxH] [-r fps] [-x drop_every_nth] "
-			       "[-d dstaddr [-o out_intrface | -p dstport]] "
-			       "[-k keydir] [-n name]\n",
-			       argv[0]);
+			puts("Usage: ./sdvrc [-u] [-t] [-i videodev] [-f CCCC -s WxH] [-r fps]");
+			puts("               [-x send_every_nth] [-k keydir] [-n name]");
+			puts("               -d dstaddr [-o out_intrface | -p dstport]");
+			puts("");
+			puts("\t-u: Use datagrams (UDP)");
+			puts("\t-t: Send a single frame on each SIGUSR1");
+			puts("\t-i: Specify capture device ('/dev/video0')");
+			puts("\t-f: Specify capture format ('YUYV')");
+			puts("\t-s: Specify capture size ('1280x720')");
+			puts("\t-x: Only send every Nth frame ('5')");
+			puts("\t-k: Specify keydir ('$HOME/.sdvr')");
+			puts("\t-n: Specify client name ('$HOSTNAME')");
+			puts("\t-o: Interface for raw ethernet ('eth0')");
+			puts("\t-p: TCP/UDP destination port ('1337')");
+			puts("");
 			exit(0);
 		default:
 			exit(1);

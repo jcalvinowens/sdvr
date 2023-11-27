@@ -1169,7 +1169,11 @@ static void parse_args(int argc, char **argv, struct server *s)
 
 			break;
 		case 'h':
-			printf("Usage: %s\n", argv[0]);
+			puts("Usage: ./sdvrd [-l listen_address] [-i listen_interface]");
+			puts("");
+			puts("\t-l: Specify IPv4/IPv6 listen address");
+			puts("\t-i: Specify interface for raw ethernet frames");
+			puts("");
 			exit(0);
 		default:
 			exit(1);
