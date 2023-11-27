@@ -1,5 +1,5 @@
-CC = gcc
-CCC = g++
+CC ?= gcc
+CCC ?= g++
 
 WFLAGS = -Wall -Wextra -Wstrict-prototypes -Wmissing-prototypes -Wno-switch \
 	 -Wmissing-declarations -Werror=implicit -Wdeclaration-after-statement \

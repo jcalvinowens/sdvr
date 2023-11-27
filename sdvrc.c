@@ -44,6 +44,7 @@ static int width;
 static int height;
 static char fmt[5] = "    ";
 static unsigned frame_step = 1;
+static int dgram_kx_rto_ms = 200;
 static const char *device_path = "/dev/video0";
 static char hostname[HOST_NAME_MAX + 1];
 static const char *key_dir;
@@ -286,16 +287,18 @@ static int enc_main_stream(void)
 	return 0;
 }
 
-
 static int enc_main_dgram(void)
 {
 	const struct authpubkey *remotekey;
 	const struct authkeypair *authkeys;
 	const struct authpubkey *savedkey;
+	struct sockaddr_any rxaddr;
 	struct enckey *enckey;
 	struct v4l2_dev *dev;
+	socklen_t rxaddrlen;
+	int ret, proto, fd;
+	struct pollfd pfd;
 	uint32_t cookie;
-	int proto, fd;
 
 	struct kx_dgram m0;
 	struct kx_dgram m1;
@@ -319,36 +322,42 @@ static int enc_main_dgram(void)
 
 	memset(&m0, 0, sizeof(m0));
 	m0.zeros_or_ones = SDVR_COOKIE_ZEROS;
-	do {
-		struct pollfd pfd;
-		int ret;
 
-		ret = sendto(fd, &m0, sizeof(uint32_t) + sizeof(m0.m0), 0,
-			     &dstaddr.sa, sa_any_len(&dstaddr));
-		if (ret != sizeof(uint32_t) + sizeof(m0.m0))
-			fatal("Can't write HELLO?\n");
+retransmit_hello:
+	ret = sendto(fd, &m0, sizeof(uint32_t) + sizeof(m0.m0), 0, &dstaddr.sa,
+		     sa_any_len(&dstaddr));
 
-		pfd.fd = fd;
-		pfd.events = POLLIN;
-		if (poll(&pfd, 1, 200) != 1) {
-			log("Retransmitting dgram HELLO...\n");
-			continue;
-		}
+	if (ret != sizeof(uint32_t) + sizeof(m0.m0))
+		fatal("Can't write dgram HELLO?\n");
 
-		ret = read(fd, &m1, sizeof(uint32_t) + sizeof(m1.m1));
-		if (ret != sizeof(uint32_t) + sizeof(m1.m1)) {
-			log("Malformed dgram HELLO reply %d...\n", ret);
-			continue;
-		}
+	log("Sent dgram HELLO\n");
 
-		if (m1.zeros_or_ones != SDVR_COOKIE_ZEROS) {
-			log("Bad pk reply cookie...\n");
-			continue;
-		}
+m1_rx_again:
+	pfd.fd = fd;
+	pfd.events = POLLIN;
+	if (poll(&pfd, 1, dgram_kx_rto_ms) != 1) {
+		err("Timeout waiting for kx_m1\n");
+		goto retransmit_hello;
+	}
 
-		break;
+	rxaddrlen = sizeof(rxaddr);
+	ret = recvfrom(fd, &m1, sizeof(uint32_t) + sizeof(m1.m1), 0,
+		       &rxaddr.sa, &rxaddrlen);
 
-	} while (1);
+	if (sa_any_cmp(&rxaddr, &dstaddr)) {
+		log("Ignoring dgram not from server\n");
+		goto m1_rx_again;
+	}
+
+	if (ret != sizeof(uint32_t) + sizeof(m1.m1)) {
+		log("Malformed kx_m1 (len=%d)\n", ret);
+		goto m1_rx_again;
+	}
+
+	if (m1.zeros_or_ones != SDVR_COOKIE_ZEROS) {
+		log("Bad kx_m1 cookie (c=%" PRIu32 ")\n", m1.zeros_or_ones);
+		goto m1_rx_again;
+	}
 
 	remotekey = new_apk(m1.m1.pk);
 	if (!remotekey)
@@ -357,43 +366,52 @@ static int enc_main_dgram(void)
 	authkeys = get_selfkeys(setup.name);
 	enckey = kx_begin(&m2.m2, authkeys, remotekey);
 	if (!enckey)
-		fatal("Bad KEX\n");
+		fatal("No memory for KEX\n");
 
 	m2.zeros_or_ones = SDVR_COOKIE_ONES;
-	do {
-		struct pollfd pfd;
-		int ret;
 
-		ret = sendto(fd, &m2, sizeof(uint32_t) + sizeof(m2.m2), 0,
-			     &dstaddr.sa, sa_any_len(&dstaddr));
-		if (ret != sizeof(uint32_t) + sizeof(m2.m2))
-			fatal("Can't write HELLO?\n");
+retransmit_m2:
+	ret = sendto(fd, &m2, sizeof(uint32_t) + sizeof(m2.m2), 0, &dstaddr.sa,
+		     sa_any_len(&dstaddr));
 
-		pfd.fd = fd;
-		pfd.events = POLLIN;
-		if (poll(&pfd, 1, 200) != 1) {
-			log("Retransmitting dgram kx_m2...\n");
-			continue;
-		}
+	if (ret != sizeof(uint32_t) + sizeof(m2.m2))
+		fatal("Can't write kx_m2?\n");
 
-		ret = read(fd, &m3, sizeof(uint32_t) + sizeof(m3.m3));
-		if (ret != sizeof(uint32_t) + sizeof(m3.m3)) {
-			log("Malformed kx reply...\n");
-			continue;
-		}
+	log("Sent kx_m2\n");
 
-		if (m3.zeros_or_ones != SDVR_COOKIE_ONES) {
-			log("Bad kx reply cookie...\n");
-			continue;
-		}
+m3_rx_again:
+	pfd.fd = fd;
+	pfd.events = POLLIN;
+	if (poll(&pfd, 1, dgram_kx_rto_ms) != 1) {
+		err("Timeout waiting for kx_m3...\n");
+		goto retransmit_m2;
+	}
 
-		break;
+	rxaddrlen = sizeof(rxaddr);
+	ret = recvfrom(fd, &m3, sizeof(uint32_t) + sizeof(m3.m3), 0,
+		       &rxaddr.sa, &rxaddrlen);
 
-	} while (1);
+	if (sa_any_cmp(&rxaddr, &dstaddr)) {
+		log("Ignoring dgram not from server\n");
+		goto m3_rx_again;
+	}
 
-	if (kx_complete(enckey, authkeys, &m3.m3))
-		fatal("Bad KEX Response\n");
+	if (ret != sizeof(uint32_t) + sizeof(m3.m3)) {
+		log("Malformed kx_m3 reply (len=%d)\n", ret);
+		goto m3_rx_again;
+	}
 
+	if (m3.zeros_or_ones != SDVR_COOKIE_ONES) {
+		log("Bad kx_m3 cookie (c=%" PRIu32 ")\n", m3.zeros_or_ones);
+		goto m3_rx_again;
+	}
+
+	if (kx_complete(enckey, authkeys, &m3.m3)) {
+		err("Bad KEX Response\n");
+		goto m3_rx_again;
+	}
+
+	log("Key exchange complete\n");
 	cookie = m3.m3.text.cookie;
 
 	msetup.cookie = cookie;
@@ -401,35 +419,43 @@ static int enc_main_dgram(void)
 	memcpy(&msetup.text.desc, &setup, sizeof(msetup.text.desc));
 	encrypt_one(msetup.text_mac, (const void *)&msetup.text,
 		    sizeof(msetup.text), enckey);
-	do {
-		struct pollfd pfd;
-		int ret;
 
-		ret = sendto(fd, &msetup, sizeof(msetup), 0, &dstaddr.sa,
-			     sa_any_len(&dstaddr));
-		if (ret != sizeof(msetup))
-			fatal("Can't write setup?\n");
+retransmit_client_setup:
+	ret = sendto(fd, &msetup, sizeof(msetup), 0, &dstaddr.sa,
+		     sa_any_len(&dstaddr));
 
-		pfd.fd = fd;
-		pfd.events = POLLIN;
-		if (poll(&pfd, 1, 200) != 1) {
-			log("Retransmitting dgram setup...\n");
-			continue;
-		}
+	if (ret != sizeof(msetup))
+		fatal("Can't write encrypted client setup?\n");
 
-		ret = read(fd, &mssetup, sizeof(mssetup));
-		if (ret != sizeof(mssetup)) {
-			log("Malformed setup reply... %d\n", ret);
-			continue;
-		}
+	log("Sent encrypted client setup\n");
 
-		if (decrypt_one_nonce((void *)&ssetup, mssetup.text_mac,
-				      sizeof(ssetup), enckey, mssetup.nonce))
-			fatal("Bad server setup desc\n");
+server_setup_rx_again:
+	pfd.fd = fd;
+	pfd.events = POLLIN;
+	if (poll(&pfd, 1, dgram_kx_rto_ms) != 1) {
+		log("Timeout waiting for server setup...\n");
+		goto retransmit_client_setup;
+	}
 
-		break;
+	rxaddrlen = sizeof(rxaddr);
+	ret = recvfrom(fd, &mssetup, sizeof(mssetup), 0,
+		       &rxaddr.sa, &rxaddrlen);
 
-	} while (1);
+	if (sa_any_cmp(&rxaddr, &dstaddr)) {
+		log("Ignoring dgram not from server\n");
+		goto server_setup_rx_again;
+	}
+
+	if (ret != sizeof(mssetup)) {
+		log("Malformed server setup (len=%d)\n", ret);
+		goto server_setup_rx_again;
+	}
+
+	if (decrypt_one_nonce((void *)&ssetup, mssetup.text_mac,
+			      sizeof(ssetup), enckey, mssetup.nonce)) {
+		err("Failed to decrypt server setup: corrupt?\n");
+		goto server_setup_rx_again;
+	}
 
 	fprintf(stderr, "Server name: %s\n", ssetup.name);
 	fprintf(stderr, "Cookie: %" PRIu32 "\n", cookie);
@@ -500,11 +526,12 @@ static void parse_args(int argc, char **argv)
 		{ "trigger", no_argument, NULL, 't' },
 		{ "outif", required_argument, NULL, 'o' },
 		{ "name", required_argument, NULL, 'n' },
+		{ "rto", required_argument, NULL, 'l' },
 		{},
 	};
 
 	while (1) {
-		int i = getopt_long(argc, argv, "hd:p:r:s:f:x:i:k:uto:n:", opts, NULL);
+		int i = getopt_long(argc, argv, "hd:p:r:s:f:x:i:k:uto:n:l:", opts, NULL);
 		char v4[strlen("::ffff:XXX.XXX.XXX.XXX") + 1];
 		char tmp[16];
 		char *w, *h;
@@ -576,14 +603,18 @@ static void parse_args(int argc, char **argv)
 		case 'n':
 			strncpy(hostname, optarg, sizeof(hostname) - 1);
 			break;
+		case 'l':
+			dgram_kx_rto_ms = atoi(optarg);
+			break;
 		case -1:
 			return;
 		case 'h':
 			puts("Usage: ./sdvrc [-u] [-t] [-i videodev] [-f CCCC -s WxH] [-r fps]");
-			puts("               [-x send_every_nth] [-k keydir] [-n name]");
+			puts("               [-x send_every_nth] [-k keydir] [-n name] [-l rto]");
 			puts("               -d dstaddr [-o out_intrface | -p dstport]");
 			puts("");
 			puts("\t-u: Use datagrams (UDP)");
+			puts("\t-l: Retransmit timeout for dgram KX ('200')");
 			puts("\t-t: Send a single frame on each SIGUSR1");
 			puts("\t-i: Specify capture device ('/dev/video0')");
 			puts("\t-f: Specify capture format ('YUYV')");

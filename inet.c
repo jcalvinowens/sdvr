@@ -49,6 +49,28 @@ unsigned sa_any_len(const struct sockaddr_any *s)
 	fatal("Bad sockaddr family: %u\n", s->sa.sa_family);
 }
 
+int sa_any_cmp(const struct sockaddr_any *a, const struct sockaddr_any *b)
+{
+	if (a->sa.sa_family != b->sa.sa_family)
+		return 1;
+
+	switch (a->sa.sa_family) {
+	case AF_INET6:
+		return memcmp(a->in6.sin6_addr.s6_addr,
+			      b->in6.sin6_addr.s6_addr, 16);
+
+	case AF_INET:
+		return memcmp(&a->in.sin_addr.s_addr,
+			      &b->in.sin_addr.s_addr, 4);
+
+	case AF_PACKET:
+		return memcmp(a->ll.sll_addr,
+			      b->ll.sll_addr, 6);
+	}
+
+	fatal("Don't know how to compare AF=%d\n", a->sa.sa_family);
+}
+
 int get_stream_listen(const struct sockaddr_any *sa)
 {
 	int listen_fd;
