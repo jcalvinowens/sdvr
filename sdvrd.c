@@ -107,6 +107,15 @@ struct rxpiece {
 };
 
 struct client {
+	int ring_fd;
+	void *ring_mmap;
+	uint64_t ring_size;
+	uint64_t ring_cur_offset;
+	uint32_t ring_cur_frame;
+	pthread_mutex_t atom_lock;
+};
+
+struct connection {
 	struct cds_lfht_node lfht_node;
 	struct rcu_head rcu;
 	uint32_t cookie;
@@ -125,12 +134,7 @@ struct client {
 	bool rx_cdesc;
 	bool rx_vdata;
 
-	int ring_fd;
-	void *ring_mmap;
-	uint64_t ring_size;
-	uint64_t ring_cur_offset;
-	uint32_t ring_cur_frame;
-	pthread_mutex_t atom_lock;
+	struct client *client;
 };
 
 struct server {
@@ -172,13 +176,14 @@ static uint32_t jhash32(uint32_t v)
 
 static int lfht_match_cookie(struct cds_lfht_node *node, const void *key)
 {
-	const struct client *c = container_of(node, struct client, lfht_node);
+	const struct connection *conn = container_of(node, struct connection,
+						     lfht_node);
 	const uint32_t *cookie = key;
 
-	return c->cookie == *cookie;
+	return conn->cookie == *cookie;
 }
 
-static struct client *lookup_client(struct server *s, uint32_t cookie)
+static struct connection *lookup_client(struct server *s, uint32_t cookie)
 {
 	struct cds_lfht_node *node;
 	struct cds_lfht_iter iter;
@@ -192,45 +197,54 @@ static struct client *lookup_client(struct server *s, uint32_t cookie)
 	if (node == NULL)
 		return NULL;
 
-	return container_of(node, struct client, lfht_node);
+	return container_of(node, struct connection, lfht_node);
 }
 
 static void destroy_client(struct rcu_head *head)
 {
-	struct client *c = container_of(head, struct client, rcu);
+	struct connection *conn = container_of(head, struct connection, rcu);
 
-	if (c->stream_sockfd != -1)
-		close(c->stream_sockfd);
+	if (conn->stream_sockfd != -1)
+		close(conn->stream_sockfd);
 
-	free(c->key);
-	free(c);
+	munmap(conn->client->ring_mmap, conn->client->ring_size);
+	ftruncate(conn->client->ring_fd, 0);
+	close(conn->client->ring_fd);
+	free(conn->client);
+	free(conn->key);
+	free(conn);
 }
 
-static void stop_client(struct server *s, struct client *c)
+static void stop_client(struct server *s, struct connection *conn)
 {
 	rcu_read_lock();
 
-	if (!cds_lfht_del(s->cookie_lfht, &c->lfht_node)) {
-		if (c->stream_sockfd != -1)
-			shutdown(c->stream_sockfd, SHUT_RDWR);
+	if (!cds_lfht_del(s->cookie_lfht, &conn->lfht_node)) {
+		if (conn->stream_sockfd != -1)
+			shutdown(conn->stream_sockfd, SHUT_RDWR);
 
-		call_rcu(&c->rcu, destroy_client);
+		call_rcu(&conn->rcu, destroy_client);
 	}
 
 	rcu_read_unlock();
 }
 
-static void ring_init(struct server *s, struct client *c)
+static void ring_init(struct server *s, struct connection *conn)
 {
 	struct shm_ring_dir_ent *ent;
 	struct shm_ring_desc *desc;
 	struct shm_ring_dir *dir;
 	struct shm_ring *ring;
+	struct client *c;
 
-	BUG_ON(!c->rx_cdesc);
+	BUG_ON(!conn->rx_cdesc);
+	conn->client = calloc(1, sizeof(*c));
+	if (!conn->client)
+		fatal("FIXME\n");
 
+	c = conn->client;
 	c->ring_size = 1 << 24; // FIXME
-	c->ring_fd = shm_open(c->cdesc.name, O_RDWR | O_CREAT, 0644);
+	c->ring_fd = shm_open(conn->cdesc.name, O_RDWR | O_CREAT, 0644);
 	if (c->ring_fd == -1)
 		fatal("FIXME\n");
 
@@ -250,12 +264,13 @@ static void ring_init(struct server *s, struct client *c)
 	desc = &ring->desc;
 	c->ring_cur_offset = (uint64_t)0-1;
 	c->ring_cur_frame = (uint32_t)0-1;
-	memcpy(desc->name, c->cdesc.name, SDVR_NAMELEN);
-	desc->pixelformat = c->cdesc.pixelformat;
-	desc->fps_numerator = c->cdesc.fps_numerator;
-	desc->fps_denominator = c->cdesc.fps_denominator;
-	desc->width = c->cdesc.width;
-	desc->height = c->cdesc.height;
+	pthread_mutex_init(&c->atom_lock, NULL);
+	memcpy(desc->name, conn->cdesc.name, SDVR_NAMELEN);
+	desc->pixelformat = conn->cdesc.pixelformat;
+	desc->fps_numerator = conn->cdesc.fps_numerator;
+	desc->fps_denominator = conn->cdesc.fps_denominator;
+	desc->width = conn->cdesc.width;
+	desc->height = conn->cdesc.height;
 	desc->ring_size = c->ring_size - 4096;
 	desc->tail_offset = 0;
 	desc->ctr = 0;
@@ -264,7 +279,7 @@ static void ring_init(struct server *s, struct client *c)
 	dir = s->ring_dir_mmap;
 
 	ent = &dir->ents[dir->desc.len++];
-	memcpy(ent->shm_path, c->cdesc.name, sizeof(ent->shm_path));
+	memcpy(ent->shm_path, conn->cdesc.name, sizeof(ent->shm_path));
 	ent->is_active = 1;
 	asm volatile ("" ::: "memory"); // smp_wmb()
 	dir->desc.gen++;
@@ -272,39 +287,39 @@ static void ring_init(struct server *s, struct client *c)
 	pthread_mutex_unlock(&s->ring_dir_lock);
 }
 
-static struct client *create_client(struct server *s, bool is_stream)
+static struct connection *create_connection(struct server *s, bool is_stream)
 {
-	struct client *c;
+	struct connection *conn;
 
-	c = calloc(1, sizeof(*c));
-	if (!c)
+	conn = calloc(1, sizeof(*conn));
+	if (!conn)
 		return NULL;
 
 	// FIXME stupid
 	if (is_stream)
-		c->stream_next = calloc(1, sizeof(struct rxpiece) +
+		conn->stream_next = calloc(1, sizeof(struct rxpiece) +
 					s->max_record_len);
 
 	/*
 	 * The values 0 and -1 are reserved for the initial key exchange.
 	 */
 again:
-	c->cookie = uatomic_add_return(&s->next_cookie, 1);
-	if (c->cookie == SDVR_COOKIE_ZEROS || c->cookie == SDVR_COOKIE_ONES)
+	conn->cookie = uatomic_add_return(&s->next_cookie, 1);
+	if (conn->cookie == SDVR_COOKIE_ZEROS ||
+	    conn->cookie == SDVR_COOKIE_ONES)
 		goto again;
 
-	pthread_mutex_init(&c->atom_lock, NULL);
-	strcpy(c->sdesc.name, s->server_name);
-	c->sdesc.max_record_len = s->max_record_len;
-	c->sdesc.max_dgram_payload = s->max_dgram_payload;
-	c->stream_sockfd = -1;
+	strcpy(conn->sdesc.name, s->server_name);
+	conn->sdesc.max_record_len = s->max_record_len;
+	conn->sdesc.max_dgram_payload = s->max_dgram_payload;
+	conn->stream_sockfd = -1;
 
 	rcu_read_lock();
-	cds_lfht_add_unique(s->cookie_lfht, jhash32(c->cookie),
-			    lfht_match_cookie, &c->cookie, &c->lfht_node);
+	cds_lfht_add_unique(s->cookie_lfht, jhash32(conn->cookie),
+			    lfht_match_cookie, &conn->cookie, &conn->lfht_node);
 	rcu_read_unlock();
 
-	return c;
+	return conn;
 }
 
 static void ring_zero(struct shm_ring *ring, uint64_t off, uint64_t len)
@@ -339,11 +354,12 @@ static void ring_read(uint8_t *out, const struct shm_ring *ring,
 		out[i] = ring->ring[off % ring->desc.ring_size];
 }
 
-static void ring_append(struct client *c, uint32_t f_seq, uint32_t f_len,
+static void ring_append(struct connection *conn, uint32_t f_seq, uint32_t f_len,
 			uint32_t f_off, const uint8_t *buf, int buf_len)
 {
-	struct shm_ring *ring = c->ring_mmap;
+	struct shm_ring *ring = conn->client->ring_mmap;
 	struct shm_ring_desc *d = &ring->desc;
+	struct client *c = conn->client;
 	struct shm_ring_head head;
 	uint64_t frame_begin_off;
 
@@ -443,7 +459,7 @@ out:
 	pthread_mutex_unlock(&c->atom_lock);
 }
 
-static int send_server_desc(struct client *c)
+static int send_server_desc(struct connection *c)
 {
 	uint8_t tmp[sizeof(c->sdesc) + SDVR_MACLEN];
 	struct iovec iovec = {
@@ -480,7 +496,7 @@ static const struct authpubkey *get_clientpk(const char *name)
 	return NULL;
 }
 
-static int rxp_process_stream(struct server *s, struct client *c,
+static int rxp_process_stream(struct server *s, struct connection *c,
 			      struct rxpiece *rxp)
 {
 	int len = rxp->iovec.iov_len;
@@ -556,7 +572,7 @@ static int rxp_process_stream(struct server *s, struct client *c,
 	return 0;
 }
 
-static int rxp_process_dgram(struct client *c, struct rxpiece *rxp, int len)
+static int rxp_process_dgram(struct connection *c, struct rxpiece *rxp, int len)
 {
 	uint8_t *buf;
 
@@ -679,7 +695,7 @@ static int dgram_ssetup(int sockfd, void *name, int namelen,
 	return sendmsg(sockfd, &msghdr, MSG_DONTWAIT) != sizeof(*tx);
 }
 
-static void stream_do_kx(struct server *s, struct client *c, int fd,
+static void stream_do_kx(struct server *s, struct connection *c, int fd,
 			 struct rxpiece *rxp)
 {
 	struct kx_msg_2 *m2 = (struct kx_msg_2 *)rxp->buf;
@@ -718,7 +734,7 @@ static void do_one_recvmmsg(struct server *s, int fd, struct mmsghdr *mmsghdrs,
 		unsigned msg_len = mmsghdrs[i].msg_len;
 		struct kx_msg_2 *kx_msg_2;
 		struct rxpiece *rxp;
-		struct client *c;
+		struct connection *c;
 		uint32_t cookie;
 
 		if (msg_len < 4)
@@ -737,7 +753,7 @@ static void do_one_recvmmsg(struct server *s, int fd, struct mmsghdr *mmsghdrs,
 		}
 
 		if (cookie == UINT32_MAX) {
-			struct client *new;
+			struct connection *new;
 
 			if (msg_len < sizeof(*kx_msg_2))
 				continue;
@@ -751,7 +767,7 @@ static void do_one_recvmmsg(struct server *s, int fd, struct mmsghdr *mmsghdrs,
 
 			// FIXME handle duplicate kx_msg_2
 
-			new = create_client(s, false);
+			new = create_connection(s, false);
 			if (!new) {
 				err("No memory for new client!\n");
 				continue;
@@ -793,16 +809,10 @@ static void do_one_recvmmsg(struct server *s, int fd, struct mmsghdr *mmsghdrs,
 				continue;
 			}
 
-			pthread_mutex_lock(&c->atom_lock);
-
-			if (!c->rx_cdesc) {
-				memcpy(&c->cdesc, &m->text.desc,
-				       sizeof(c->cdesc));
-				c->rx_cdesc = true;
-				ring_init(s, c);
-			}
-
-			pthread_mutex_unlock(&c->atom_lock);
+			// FIXME racy
+			memcpy(&c->cdesc, &m->text.desc, sizeof(c->cdesc));
+			c->rx_cdesc = true;
+			ring_init(s, c);
 
 			dgram_ssetup(fd, msg_hdr->msg_name,
 				     msg_hdr->msg_namelen, &c->ssmsg);
@@ -871,7 +881,7 @@ static void *ethernet_receive_thread(void *arg)
 	return dgram_receive_thread(s, get_dgram_bind(&addr));
 }
 
-static void drain_client_stream(struct server *s, struct client *c)
+static void drain_client_stream(struct server *s, struct connection *c)
 {
 	while (1) {
 		struct rxpiece *rxp = c->stream_next;
@@ -926,7 +936,7 @@ static void accept_new_connections(struct server *s, int listen_fd)
 		struct sockaddr_any srcaddr;
 		socklen_t addrlen = sizeof(srcaddr);
 		struct epoll_event evt;
-		struct client *new;
+		struct connection *new;
 		int newfd;
 
 		newfd = accept4(listen_fd, (void *)&srcaddr,
@@ -947,7 +957,7 @@ static void accept_new_connections(struct server *s, int listen_fd)
 			continue;
 		}
 
-		new = create_client(s, true);
+		new = create_connection(s, true);
 		if (!new) {
 			err("No memory for client\n");
 			close(newfd);
@@ -1008,7 +1018,7 @@ static void *stream_receive_thread(void *arg)
 		for (i = 0; i < r; i++) {
 			uint32_t cookie = evts[i].data.u32;
 			uint32_t events = evts[i].events;
-			struct client *c;
+			struct connection *c;
 
 			if (cookie == ACCEPT_COOKIE_MAGIC) {
 				accept_new_connections(s, listen_fd);
