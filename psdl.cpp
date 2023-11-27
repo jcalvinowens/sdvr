@@ -133,6 +133,13 @@ public:
 			memset(tmp, 127, f->height * f->width / 4);
 			break;
 
+		case AV_PIX_FMT_YUYV422:
+		case AV_PIX_FMT_UYVY422:
+		case AV_PIX_FMT_YVYU422:
+			memcpy(tmp, f->data[0], f->height * f->width +
+						f->height * f->width / 2 * 2);
+			break;
+
 		default:
 			memcpy(ptr, f->data[0], f->height * f->width);
 			break;

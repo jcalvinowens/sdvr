@@ -238,9 +238,11 @@ public:
 	explicit DecodingSDVRClient(std::string shm_path) : SDVRClientBase(shm_path)
 	{
 		lavc_codec_ = v4l2_pixfmt_to_lavc_codec(desc()->pixelformat);
+		fframe_ = av_frame_alloc();
 
 		// Fow RAWVIDEO formats, no need to involve libavcodec at all.
 		if (lavc_codec_ == AV_CODEC_ID_RAWVIDEO) {
+			lavc_pixfmt_ = v4l2_pixfmt_to_lavc_pixfmt(desc()->pixelformat);
 			codec_ = nullptr;
 			return;
 		}
@@ -253,13 +255,9 @@ public:
 		ctx_ = avcodec_alloc_context3(codec_);
 		ctx_->get_format = this->get_format;
 
-		if (codec_->capabilities & AV_CODEC_CAP_TRUNCATED)
-			ctx_->flags |= AV_CODEC_FLAG_TRUNCATED;
-
 		if (avcodec_open2(ctx_, codec_, nullptr) < 0)
 			throw std::runtime_error("Can't open codec!");
 
-		fframe_ = av_frame_alloc();
 		pkt_ = av_packet_alloc();
 	}
 
@@ -339,7 +337,35 @@ public:
 		int in_len = head->frame_len;
 
 		if (!codec_) {
-			process_decoded(fframe_); // FIXME
+			fframe_->format = lavc_pixfmt_;
+			fframe_->height = desc()->height;
+			fframe_->width = desc()->width;
+
+			// FIXME
+			switch (fframe_->format) {
+			case AV_PIX_FMT_YUVJ422P:
+				fframe_->data[0] = in_data;
+				fframe_->data[1] = fframe_->data[0] +
+					fframe_->height * fframe_->width;
+				fframe_->data[2] = fframe_->data[1] +
+					fframe_->height * fframe_->width / 2;
+				break;
+
+			case AV_PIX_FMT_YUVJ420P:
+			case AV_PIX_FMT_YUV420P:
+				fframe_->data[0] = in_data;
+				fframe_->data[1] = fframe_->data[0] +
+					fframe_->height * fframe_->width;
+				fframe_->data[2] = fframe_->data[1] +
+					fframe_->height * fframe_->width / 4;
+				break;
+
+			default:
+				fframe_->data[0] = in_data;
+				break;
+			}
+
+			process_decoded(fframe_);
 			return;
 		}
 
@@ -374,6 +400,7 @@ resend_packet:
 private:
 
 	enum AVCodecID lavc_codec_;
+	enum AVPixelFormat lavc_pixfmt_;
 	AVCodecParserContext *pctx_;
 	const AVCodec *codec_;
 	AVCodecContext *ctx_;
