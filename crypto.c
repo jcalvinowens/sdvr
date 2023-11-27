@@ -34,7 +34,6 @@
 #include <nacl/crypto_secretbox.h>
 #include <nacl/crypto_box.h>
 #include <nacl/crypto_hash.h>
-#include <nacl/randombytes.h>
 
 #define crypto_secretbox_MACBYTES (16)
 #define crypto_secretbox_PADBYTES (16)
@@ -118,11 +117,6 @@ static void __randombytes(void *x, ssize_t xlen, int flags)
 {
 	BUG_ON(xlen > 256);
 	BUG_ON(getrandom(x, xlen, flags) != xlen);
-}
-
-void randombytes(unsigned char *x, unsigned long long xlen)
-{
-	__randombytes(x, (ssize_t)xlen, 0);
 }
 
 uint64_t crypto_nonce_seq_tx(const struct enckey *k)
