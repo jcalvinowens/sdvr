@@ -54,6 +54,22 @@
  * able to record all network traffic from a client, and later compromise that
  * client and obtain its secret keys, will not be able to decrypt any of the
  * recorded data.
+ *
+ * The key exchange consists of four messages. Eventually, the first one or two
+ * will be able to be omitted if the client/server already know each other's
+ * public keys, but that isn't implemented yet.
+ *
+ *	SERVER  <--- kx_msg_0 ---    CLIENT (DGRAM only)
+ *	SERVER   --- kx_msg_1 --->   CLIENT
+ *	SERVER  <--- kx_msg_2 ---    CLIENT
+ *	SERVER   --- kx_msg_3 --->   CLIENT
+ *
+ * After that, everything is encrypted with the ECDH derived keys.
+ *
+ *	SERVER  <--- c_setup ---     CLIENT
+ *	SERVER   --- s_setup --->    CLIENT
+ *	SERVER  <<<<< VIDEO <<<<     CLIENT
+ *	SERVER  <<<<< VIDEO <<<<     CLIENT
  **/
 
 /*
