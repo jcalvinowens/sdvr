@@ -36,10 +36,10 @@ struct enckey *kx_finish_reply(const struct kx_msg_2 *m2, struct kx_msg_3 *m3,
 uint64_t crypto_nonce_seq_tx(const struct enckey *k);
 uint64_t crypto_nonce_seq_rx(const struct enckey *k);
 
-void encrypt_one(uint8_t *out, const uint8_t *in, int len, struct enckey *k);
-void encrypt_one_nonce(uint8_t *out, const uint8_t *in, int len,
+void encrypt_one(void *out, const void *in, int len, struct enckey *k);
+void encrypt_one_nonce(void *out, const void *in, int len,
 		       struct enckey *k, uint64_t nonce);
 
-int decrypt_one(uint8_t *out, const uint8_t *in, int declen, struct enckey *k);
-int decrypt_one_nonce(uint8_t *out, const uint8_t *in, int declen,
+int decrypt_one(void *out, const void *in, int declen, struct enckey *k);
+int decrypt_one_nonce(void *out, const void *in, int declen,
 		      struct enckey *k, uint64_t nonce);

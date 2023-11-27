@@ -379,7 +379,7 @@ static void __encrypt_one(uint8_t *b, int l, const uint8_t *n, const uint8_t *k)
 	crypto_secretbox(b, b, crypto_secretbox_ZEROBYTES + l, n, k);
 }
 
-void encrypt_one_nonce(uint8_t *out, const uint8_t *in, int len,
+void encrypt_one_nonce(void *out, const void *in, int len,
 		       struct enckey *k, uint64_t nonce)
 {
 	uint8_t tmp_nonce[sizeof(k->tx.nonce)];
@@ -401,7 +401,7 @@ void encrypt_one_nonce(uint8_t *out, const uint8_t *in, int len,
 	memcpy(out, ciptxt, crypto_secretbox_MACBYTES + len);
 }
 
-void encrypt_one(uint8_t *out, const uint8_t *in, int len, struct enckey *k)
+void encrypt_one(void *out, const void *in, int len, struct enckey *k)
 {
 	encrypt_one_nonce(out, in, len, k, k->tx.nonce_seq++);
 }
@@ -414,7 +414,7 @@ static int __decrypt_one(uint8_t *b, int l, const uint8_t *n, const uint8_t *k)
 	return 0;
 }
 
-int decrypt_one_nonce(uint8_t *out, const uint8_t *in, int declen,
+int decrypt_one_nonce(void *out, const void *in, int declen,
 		      struct enckey *k, uint64_t nonce)
 {
 	uint8_t tmp_nonce[sizeof(k->rx.nonce)];
@@ -439,7 +439,7 @@ int decrypt_one_nonce(uint8_t *out, const uint8_t *in, int declen,
 	return 0;
 }
 
-int decrypt_one(uint8_t *out, const uint8_t *in, int declen, struct enckey *k)
+int decrypt_one(void *out, const void *in, int declen, struct enckey *k)
 {
 	return decrypt_one_nonce(out, in, declen, k, k->rx.nonce_seq++);
 }
