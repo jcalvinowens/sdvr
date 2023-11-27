@@ -145,7 +145,7 @@ struct server {
 	int ifindex;
 	int stop;
 
-	struct cds_lfht *cookie_lfht;
+	struct cds_lfht *connection_lfht;
 	uint32_t next_cookie;
 
 	pthread_t *stream_rx_threads;
@@ -189,7 +189,7 @@ static struct connection *lookup_client(struct server *s, uint32_t cookie)
 	struct cds_lfht_iter iter;
 
 	rcu_read_lock();
-	cds_lfht_lookup(s->cookie_lfht, jhash32(cookie), lfht_match_cookie,
+	cds_lfht_lookup(s->connection_lfht, jhash32(cookie), lfht_match_cookie,
 			&cookie, &iter);
 	node = cds_lfht_iter_get_node(&iter);
 	rcu_read_unlock();
@@ -219,7 +219,7 @@ static void stop_client(struct server *s, struct connection *conn)
 {
 	rcu_read_lock();
 
-	if (!cds_lfht_del(s->cookie_lfht, &conn->lfht_node)) {
+	if (!cds_lfht_del(s->connection_lfht, &conn->lfht_node)) {
 		if (conn->stream_sockfd != -1)
 			shutdown(conn->stream_sockfd, SHUT_RDWR);
 
@@ -315,7 +315,7 @@ again:
 	conn->stream_sockfd = -1;
 
 	rcu_read_lock();
-	cds_lfht_add_unique(s->cookie_lfht, jhash32(conn->cookie),
+	cds_lfht_add_unique(s->connection_lfht, jhash32(conn->cookie),
 			    lfht_match_cookie, &conn->cookie, &conn->lfht_node);
 	rcu_read_unlock();
 
@@ -1195,9 +1195,9 @@ int main(int argc, char **argv)
 	if (s.stream_epoll_fd == -1)
 		fatal("Can't make epoll instance: %m\n");
 
-	s.cookie_lfht = cds_lfht_new_flavor(64, 64, 0, CDS_LFHT_AUTO_RESIZE,
+	s.connection_lfht = cds_lfht_new_flavor(64, 64, 0, CDS_LFHT_AUTO_RESIZE,
 					    &urcu_qsbr_flavor, NULL);
-	if (!s.cookie_lfht)
+	if (!s.connection_lfht)
 		fatal("Can't make cookie rculfhash\n");
 
 	if (gethostname(s.server_name, sizeof(s.server_name))) {
