@@ -107,10 +107,14 @@ struct client {
 	struct rxpiece *stream_next;
 	unsigned stream_cur_off;
 
+	struct kx_msg_3 kxmsg;
+	struct server_setup_dgram ssmsg;
+	struct sockaddr_any lastsrc;
 	struct server_setup_desc sdesc;
 	struct client_setup_desc cdesc;
 	struct enckey *key;
 	bool rx_cdesc;
+	bool rx_vdata;
 
 	pthread_mutex_t atom_lock;
 	struct client *list_next;
@@ -138,7 +142,6 @@ struct server {
 	int cookie_htable_load;
 	uint32_t next_cookie;
 
-	// FIXME: Implement timeouts for new connections
 	pthread_mutex_t new_list_lock;
 	struct client *new_list;
 
@@ -332,6 +335,13 @@ static struct client *create_client(struct server *s, bool is_stream, int fd)
 	pthread_rwlock_unlock(&s->cookie_lookup_rwlock);
 
 	return c;
+}
+
+static void destroy_client(struct server *s, struct client *c)
+{
+	(void)*s;
+	(void)*c;
+	// FIXME
 }
 
 static void ring_zero(struct shm_ring *ring, uint64_t off, uint64_t len)
@@ -602,6 +612,7 @@ static int rxp_process_dgram(struct client *c, struct rxpiece *rxp)
 		    r->offset,
 		    r->data, textlen - sizeof(struct dgram_frame));
 
+	c->rx_vdata = true;
 	return 0;
 }
 
@@ -623,6 +634,70 @@ static int send_kx_msg_1(struct server *s, int sockfd, void *name, int namelen)
 
 static int send_kx_msg_3(int sockfd, void *name, int namelen,
 			 const struct kx_msg_3 *tx)
+{
+	struct iovec iovec = {
+		.iov_base = (void *)tx,
+		.iov_len = sizeof(*tx),
+	};
+	struct msghdr msghdr = {
+		.msg_name = name,
+		.msg_namelen = namelen,
+		.msg_iov = &iovec,
+		.msg_iovlen = 1,
+	};
+
+	return sendmsg(sockfd, &msghdr, MSG_DONTWAIT) != sizeof(*tx);
+}
+
+static int dgram_kx_msg_1(struct server *s, int sockfd, void *name, int namelen)
+{
+	uint32_t zeros = 0;
+	struct iovec iovec[2] = {
+		{
+			.iov_base = &zeros,
+			.iov_len = sizeof(zeros),
+		},
+		{
+			.iov_base = (void *)__pk(authkeypair_apk(s->authkey)),
+			.iov_len = SDVR_PKLEN,
+		},
+	};
+	struct msghdr msghdr = {
+		.msg_name = name,
+		.msg_namelen = namelen,
+		.msg_iov = iovec,
+		.msg_iovlen = 2,
+	};
+
+	return sendmsg(sockfd, &msghdr, MSG_DONTWAIT) != SDVR_PKLEN + 4;
+}
+
+static int dgram_kx_msg_3(int sockfd, void *name, int namelen,
+			 const struct kx_msg_3 *tx)
+{
+	uint32_t ones = 0-1;
+	struct iovec iovec[2] = {
+		{
+			.iov_base = &ones,
+			.iov_len = sizeof(ones),
+		},
+		{
+			.iov_base = (void *)tx,
+			.iov_len = sizeof(*tx),
+		},
+	};
+	struct msghdr msghdr = {
+		.msg_name = name,
+		.msg_namelen = namelen,
+		.msg_iov = iovec,
+		.msg_iovlen = 2,
+	};
+
+	return sendmsg(sockfd, &msghdr, MSG_DONTWAIT) != sizeof(*tx) + 4;
+}
+
+static int dgram_ssetup(int sockfd, void *name, int namelen,
+		       const struct server_setup_dgram *tx)
 {
 	struct iovec iovec = {
 		.iov_base = (void *)tx,
@@ -711,18 +786,64 @@ static void *dgram_receive_thread(void *arg)
 				    < SDVR_HELLOLEN)
 					continue;
 
-				send_kx_msg_1(s, dgram_fd, &rxp->src,
+				dgram_kx_msg_1(s, dgram_fd, &rxp->src,
 					      sa_any_len(&rxp->src));
 				continue;
 
 			}
 
 			if (cookie == UINT32_MAX) {
+				struct client *new;
+
 				if (mmsghdrs[i].msg_hdr.msg_iov->iov_len - 4
 				    < sizeof(*kx_msg_2))
 					continue;
 
-				fatal("FIXME DGRAM KX Unimplemented\n");
+				kx_msg_2 = mmsghdrs[i].msg_hdr.msg_iov->iov_base
+					   + sizeof(uint32_t);
+
+				if (kx_start_reply(kx_msg_2, s->authkey)) {
+					err("Bad KX!\n");
+					continue;
+				}
+
+				// FIXME handle duplicate kx_msg_2
+
+				new = create_client(s, false, dgram_fd);
+				if (!new) {
+					err("No memory for new client!\n");
+					continue;
+				}
+
+				new->key = kx_finish_reply(kx_msg_2,
+							   &new->kxmsg,
+							   s->authkey,
+							   new->cookie);
+				if (!new->key) {
+					err("No memory for new key!\n");
+					destroy_client(s, new);
+					continue;
+				}
+
+				memcpy(&new->ssmsg.text.desc, &new->sdesc,
+				       sizeof(new->sdesc));
+
+				new->ssmsg.nonce = crypto_nonce_seq_tx(new->key);
+				encrypt_one(new->ssmsg.text_mac,
+					    (void *)&new->ssmsg.text,
+					    sizeof(new->ssmsg.text), new->key);
+
+				pthread_mutex_lock(&s->new_list_lock);
+				new->list_next = s->new_list;
+				s->new_list = new;
+				pthread_mutex_unlock(&s->new_list_lock);
+
+				dgram_kx_msg_3(dgram_fd,
+					      mmsghdrs[i].msg_hdr.msg_name,
+					      mmsghdrs[i].msg_hdr.msg_namelen,
+					      &new->kxmsg);
+
+				continue;
 			}
 
 			c = lookup_client(s, cookie);
@@ -730,6 +851,35 @@ static void *dgram_receive_thread(void *arg)
 				continue;
 
 			BUG_ON(!c->key);
+
+			if (!c->rx_cdesc) {
+				struct client_setup_dgram *m =
+					mmsghdrs[i].msg_hdr.msg_iov->iov_base;
+
+				if (decrypt_one((void *)&m->text, m->text_mac, sizeof(m->text), c->key)) {
+					err("Bad client desc?\n");
+					continue;
+				}
+
+				pthread_mutex_lock(&c->atom_lock);
+
+				if (!c->rx_cdesc) {
+					memcpy(&c->cdesc, &m->text.desc,
+					       sizeof(c->cdesc));
+					c->rx_cdesc = true;
+					ring_init(s, c);
+				}
+
+				pthread_mutex_unlock(&c->atom_lock);
+
+				dgram_ssetup(dgram_fd,
+					    mmsghdrs[i].msg_hdr.msg_name,
+					    mmsghdrs[i].msg_hdr.msg_namelen,
+					    &c->ssmsg);
+
+				continue;
+			}
+
 			rxp->iovec.iov_len = mmsghdrs[i].msg_len;
 			rxp_process_dgram(c, rxp);
 		}

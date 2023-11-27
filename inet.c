@@ -217,7 +217,9 @@ void get_sock_macaddr(int sockfd, uint8_t *macaddr)
 		}
 	}
 
-	fatal("Can't find our interface!\n");
+	err("Can't find our interface!\n");
+	memset(macaddr, 0, 8);
+	goto out;
 
 found:
 	for (c = ifaddrs; c; c = c->ifa_next) {
@@ -237,5 +239,6 @@ found:
 		fatal("Can't find our MAC!\n");
 
 	memcpy(macaddr, ll->sll_addr, 8);
+out:
 	freeifaddrs(ifaddrs);
 }

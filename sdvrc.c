@@ -30,6 +30,7 @@
 #include <errno.h>
 #include <getopt.h>
 #include <unistd.h>
+#include <poll.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/stat.h>
@@ -203,7 +204,7 @@ static const struct authkeypair *get_selfkeys(const char *name)
 	return new;
 }
 
-static int enc_main(void)
+static int enc_main_stream(void)
 {
 	const struct authpubkey *remotekey;
 	const struct authkeypair *authkeys;
@@ -216,7 +217,6 @@ static int enc_main(void)
 	struct kx_msg_2 m2;
 	struct kx_msg_3 m3;
 	uint8_t tmp[4096];
-	uint32_t cookie;
 	FILE *tx, *rx;
 	int fd;
 
@@ -259,8 +259,6 @@ static int enc_main(void)
 	if (kx_complete(enckey, authkeys, &m3))
 		fatal("Bad KEX Response\n");
 
-	cookie = m3.text.cookie;
-
 	encrypt_one(tmp, (const void *)&setup, sizeof(setup), enckey);
 	if (!fwrite(tmp, 1, SDVR_MACLEN + sizeof(setup), tx))
 		fatal("Bad write: %m\n");
@@ -274,6 +272,171 @@ static int enc_main(void)
 	fclose(rx);
 
 	fprintf(stderr, "Server name: %s\n", ssetup.name);
+	savedkey = get_serverpk(ssetup.name);
+
+	if (!savedkey)
+		if (save_serverpk(enckey, ssetup.name))
+			fprintf(stderr, "Can't save server key!\n");
+
+	if (savedkey && pk_cmp(enckey, savedkey))
+		fatal("Server key changed!\n");
+
+	run_stream_tx(dev, enckey, tx);
+
+	fclose(tx);
+	free(enckey);
+	v4l2_close(dev);
+	free((void *)authkeys);
+	free((void *)savedkey);
+	free((void *)remotekey);
+	return 0;
+}
+
+
+static int enc_main_dgram(void)
+{
+	const struct authpubkey *remotekey;
+	const struct authkeypair *authkeys;
+	const struct authpubkey *savedkey;
+	struct client_setup_desc setup;
+	struct server_setup_desc ssetup;
+	struct enckey *enckey;
+	struct v4l2_dev *dev;
+	uint8_t macaddr[8];
+	struct kx_dgram m0;
+	struct kx_dgram m1;
+	struct kx_dgram m2;
+	struct kx_dgram m3;
+	struct client_setup_dgram msetup;
+	struct server_setup_dgram mssetup;
+	uint32_t cookie;
+	int fd;
+
+	fd = get_dgram_connect(&dstaddr);
+	if (fd == -1)
+		fatal("Can't connect: %m\n");
+
+	dev = v4l2_open(device_path, *(uint32_t *)fmt, fps, width, height);
+
+	v4l2_get_setup(dev, &setup);
+	get_sock_macaddr(fd, macaddr);
+	snprintf(setup.name, sizeof(setup.name),
+		 "%s@%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx",
+		 get_dev_businfo(dev), macaddr[0], macaddr[1], macaddr[2],
+		 macaddr[3], macaddr[4], macaddr[5], macaddr[6], macaddr[7]);
+
+	memset(&m0, 0, sizeof(m0));
+	m0.zeros_or_ones = SDVR_COOKIE_ZEROS;
+	do {
+		struct pollfd pfd;
+		int ret;
+
+		ret = write(fd, &m0, sizeof(uint32_t) + sizeof(m0.m0));
+		if (ret != sizeof(uint32_t) + sizeof(m0.m0))
+			fatal("Can't write HELLO?\n");
+
+		pfd.fd = fd;
+		pfd.events = POLLIN;
+		if (poll(&pfd, 1, 200) != 1) {
+			log("Retransmitting dgram HELLO...\n");
+			continue;
+		}
+
+		ret = read(fd, &m1, sizeof(uint32_t) + sizeof(m1.m1));
+		if (ret != sizeof(uint32_t) + sizeof(m1.m1)) {
+			log("Malformed dgram HELLO reply %d...\n", ret);
+			continue;
+		}
+
+		if (m1.zeros_or_ones != SDVR_COOKIE_ZEROS) {
+			log("Bad pk reply cookie...\n");
+			continue;
+		}
+
+		break;
+
+	} while (1);
+
+	remotekey = new_apk(m1.m1.pk);
+	if (!remotekey)
+		fatal("No memory for PK!\n");
+
+	authkeys = get_selfkeys(setup.name);
+	enckey = kx_begin(&m2.m2, authkeys, remotekey);
+	if (!enckey)
+		fatal("Bad KEX\n");
+
+	m2.zeros_or_ones = SDVR_COOKIE_ONES;
+	do {
+		struct pollfd pfd;
+		int ret;
+
+		ret = write(fd, &m2, sizeof(uint32_t) + sizeof(m2.m2));
+		if (ret != sizeof(uint32_t) + sizeof(m2.m2))
+			fatal("Can't write HELLO?\n");
+
+		pfd.fd = fd;
+		pfd.events = POLLIN;
+		if (poll(&pfd, 1, 200) != 1) {
+			log("Retransmitting dgram kx_m2...\n");
+			continue;
+		}
+
+		ret = read(fd, &m3, sizeof(uint32_t) + sizeof(m3.m3));
+		if (ret != sizeof(uint32_t) + sizeof(m3.m3)) {
+			log("Malformed kx reply...\n");
+			continue;
+		}
+
+		if (m3.zeros_or_ones != SDVR_COOKIE_ONES) {
+			log("Bad kx reply cookie...\n");
+			continue;
+		}
+
+		break;
+
+	} while (1);
+
+	if (kx_complete(enckey, authkeys, &m3.m3))
+		fatal("Bad KEX Response\n");
+
+	cookie = m3.m3.text.cookie;
+
+	msetup.cookie = cookie;
+	msetup.nonce = crypto_nonce_seq_tx(enckey);
+	memcpy(&msetup.text.desc, &setup, sizeof(msetup.text.desc));
+	encrypt_one(msetup.text_mac, (const void *)&msetup.text,
+		    sizeof(msetup.text), enckey);
+	do {
+		struct pollfd pfd;
+		int ret;
+
+		ret = write(fd, &msetup, sizeof(msetup));
+		if (ret != sizeof(msetup))
+			fatal("Can't write setup?\n");
+
+		pfd.fd = fd;
+		pfd.events = POLLIN;
+		if (poll(&pfd, 1, 200) != 1) {
+			log("Retransmitting dgram setup...\n");
+			continue;
+		}
+
+		ret = read(fd, &mssetup, sizeof(mssetup));
+		if (ret != sizeof(mssetup)) {
+			log("Malformed setup reply... %d\n", ret);
+			continue;
+		}
+
+		if (decrypt_one_nonce((void *)&ssetup, mssetup.text_mac,
+				      sizeof(ssetup), enckey, mssetup.nonce))
+			fatal("Bad server setup desc\n");
+
+		break;
+
+	} while (1);
+
+	fprintf(stderr, "Server name: %s\n", ssetup.name);
 	fprintf(stderr, "Cookie: %" PRIu32 "\n", cookie);
 	savedkey = get_serverpk(ssetup.name);
 
@@ -284,17 +447,9 @@ static int enc_main(void)
 	if (savedkey && pk_cmp(enckey, savedkey))
 		fatal("Server key changed!\n");
 
-	if (use_udp) {
-		int fd;
+	run_dgram_tx(dev, enckey, fd, cookie);
 
-		fd = get_dgram_connect(&dstaddr);
-		run_dgram_tx(dev, enckey, fd, cookie);
-		close(fd);
-
-	} else
-		run_stream_tx(dev, enckey, tx);
-
-	fclose(tx);
+	close(fd);
 	free(enckey);
 	v4l2_close(dev);
 	free((void *)authkeys);
@@ -417,5 +572,8 @@ int main(int argc, char **argv)
 	if (sigusr_trigger)
 		sigaction(SIGUSR1, &triggersig, NULL);
 
-	return enc_main();
+	if (use_udp)
+		return enc_main_dgram();
+
+	return enc_main_stream();
 }

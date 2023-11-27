@@ -114,8 +114,8 @@ struct kx_msg_2 {
 /*
  * SERVER -> CLIENT
  *
- * To encrypt msg_2, the client must already know the server PK, so it is not
- * included in msg_3.
+ * To encrypt msg_2, the client must have already known the server PK, so it is
+ * not included in msg_3. The cookie is ignored for STREAM sockets.
  */
 
 struct kx_msg_3_text {
@@ -128,25 +128,6 @@ struct kx_msg_3 {
 	uint8_t kx_nonce[SDVR_NONCELEN];
 	uint8_t text_mac[SDVR_MACLEN];
 	struct kx_msg_3_text text;
-
-} __attribute__((packed));
-
-/*
- * Cookies 0x00000000 and 0xffffffff are reserved for the initial key exchange.
- */
-
-#define SDVR_COOKIE_ZEROS	((uint32_t)0)
-#define SDVR_COOKIE_ONES	((uint32_t)0-1)
-
-struct kx_dgram {
-	uint32_t zeros_or_ones;
-
-	union {
-		struct kx_msg_0 kx_msg_0;	// zeros
-		struct kx_msg_1 kx_msg_1;	// zeros
-		struct kx_msg_2 kx_msg_2;	// ones
-		struct kx_msg_3 kx_msg_3;	// ones
-	};
 
 } __attribute__((packed));
 
@@ -185,6 +166,55 @@ struct frame_desc {
 } __attribute__((packed));
 
 /*
+ * DGRAM cookies 0x00000000 and 0xffffffff are reserved for the key exchange.
+ */
+
+#define SDVR_COOKIE_ZEROS	((uint32_t)0)
+#define SDVR_COOKIE_ONES	((uint32_t)0-1)
+
+struct kx_dgram {
+	uint32_t zeros_or_ones;
+
+	union {
+		struct kx_msg_0 m0;	// zeros: client -> server
+		struct kx_msg_1 m1;	// zeros: server -> client
+		struct kx_msg_2 m2;	// ones:  client -> server
+		struct kx_msg_3 m3;	// ones:  server -> client
+	};
+
+} __attribute__((packed));
+
+/*
+ * DGRAM structures for exchanging setup data.
+ */
+
+struct client_setup_dgram_text {
+	struct client_setup_desc desc;
+
+} __attribute__((packed));
+
+struct client_setup_dgram {
+	uint32_t cookie;
+
+	uint64_t nonce;
+	uint8_t text_mac[SDVR_MACLEN];
+	struct client_setup_dgram_text text;
+
+} __attribute__((packed));
+
+struct server_setup_dgram_text {
+	struct server_setup_desc desc;
+
+} __attribute__((packed));
+
+struct server_setup_dgram {
+	uint64_t nonce;
+	uint8_t text_mac[SDVR_MACLEN];
+	struct server_setup_dgram_text text;
+
+} __attribute__((packed));
+
+/*
  * The header for each record in DGRAM sockets.
  *
  * Sending PTS/SEQ/LEN with every record is unnecessary, but costs very little
@@ -202,7 +232,7 @@ struct dgram_frame {
 } __attribute__((packed));
 
 /*
- * DGRAM packet structure.
+ * DGRAM video packet structure.
  *
  * Clients are multiplexed using a 32-bit "cookie" value, allowing a single UDP
  * port to serve 2^32 clients.

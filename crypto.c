@@ -52,7 +52,6 @@ static_assert(SDVR_PLEN == crypto_scalarmult_curve25519_BYTES);
 
 static_assert(__builtin_offsetof(struct kx_msg_2, text) > crypto_box_ZEROBYTES);
 static_assert(__builtin_offsetof(struct kx_msg_3, text) > crypto_box_ZEROBYTES);
-static_assert(crypto_hash_BYTES >= crypto_secretbox_KEYBYTES * 2);
 
 struct authpubkey {
 	uint8_t pk[crypto_box_PUBLICKEYBYTES];
