@@ -17,12 +17,23 @@
 #include "common.h"
 #include "crypto.h"
 #include "proto.h"
+#include "rc5.h"
 
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
-static void test_kx(void)
+static void test_rc5(void)
+{
+	const struct rc5_ctx *c = rc5_init();
+
+	if (rc5_unscramble(c, rc5_scramble(c, 0xaaaaaaaaul)) != 0xaaaaaaaaul)
+		fatal("rc5_descramble(rc5_scramble())\n");
+
+	free((void *)c);
+}
+
+static void test_crypto(void)
 {
 	uint8_t str[16] = {0};
 	uint8_t cip[SDVR_MACLEN + 16];
@@ -71,7 +82,7 @@ static void test_kx(void)
 
 int main(void)
 {
-	test_kx();
-
+	test_crypto();
+	test_rc5();
 	return 0;
 }

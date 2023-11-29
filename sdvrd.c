@@ -20,7 +20,7 @@
 #include "common.h"
 #include "crypto.h"
 #include "inet.h"
-#include "jhash.h"
+#include "rc5.h"
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -94,6 +94,10 @@ static int new_tfd(int64_t interval_us)
 	return fd;
 }
 
+/*
+ * For stream sockets, which store cookies in epoll_event data, cookie zero
+ * indicates the listen() file descriptor.
+ */
 #define ACCEPT_COOKIE_MAGIC	((uint32_t)0)
 
 struct rxpiece {
@@ -146,6 +150,7 @@ struct server {
 	int stop;
 
 	struct cds_lfht *connection_lfht;
+	const struct rc5_ctx *cookie_ctx;
 	uint32_t next_cookie;
 
 	pthread_t *stream_rx_threads;
@@ -169,11 +174,6 @@ struct server {
 	int ring_dir_fd;
 };
 
-static uint32_t jhash32(uint32_t v)
-{
-	return jhash(&v, sizeof(v), 0xaaaaaaaaul);
-}
-
 static int lfht_match_cookie(struct cds_lfht_node *node, const void *key)
 {
 	const struct connection *conn = container_of(node, struct connection,
@@ -189,7 +189,7 @@ static struct connection *lookup_client(struct server *s, uint32_t cookie)
 	struct cds_lfht_iter iter;
 
 	rcu_read_lock();
-	cds_lfht_lookup(s->connection_lfht, jhash32(cookie), lfht_match_cookie,
+	cds_lfht_lookup(s->connection_lfht, cookie, lfht_match_cookie,
 			&cookie, &iter);
 	node = cds_lfht_iter_get_node(&iter);
 	rcu_read_unlock();
@@ -289,6 +289,7 @@ static void ring_init(struct server *s, struct connection *conn)
 
 static struct connection *create_connection(struct server *s, bool is_stream)
 {
+	struct cds_lfht_node *ret;
 	struct connection *conn;
 
 	conn = calloc(1, sizeof(*conn));
@@ -300,24 +301,52 @@ static struct connection *create_connection(struct server *s, bool is_stream)
 		conn->stream_next = calloc(1, sizeof(struct rxpiece) +
 					s->max_record_len);
 
-	/*
-	 * The values 0 and -1 are reserved for the initial key exchange.
-	 */
-again:
-	conn->cookie = uatomic_add_return(&s->next_cookie, 1);
-	if (conn->cookie == SDVR_COOKIE_ZEROS ||
-	    conn->cookie == SDVR_COOKIE_ONES)
-		goto again;
-
 	strcpy(conn->sdesc.name, s->server_name);
 	conn->sdesc.max_record_len = s->max_record_len;
 	conn->sdesc.max_dgram_payload = s->max_dgram_payload;
 	conn->stream_sockfd = -1;
 
+	/*
+	 * The cookies aren't secret: an attacker can't compromise any data by
+	 * working out a valid cookie, or even the cookie for a specific client.
+	 * But, knowing a valid cookie allows the attacker to force us to waste
+	 * cpu evaluating spoofed signatures, so it would be nice if they were
+	 * hard to guess (statistically random). They still need to be unique.
+	 *
+	 * We can obtain both properties by applying an encryption algorithm to
+	 * a simple counter. RC5 was choosen because it is relatively fast,
+	 * patent free, and trivial to implement for a 32-bit block size.
+	 *
+	 * Hashing doesn't work, because we would have to deal with potential
+	 * collisions. An encrypted counter guarantees collisions are impossible
+	 * until the counter has wrapped, which at 100 connections/sec takes 1.5
+	 * years.
+	 */
+
+again:
+	conn->cookie = uatomic_add_return(&s->next_cookie, 1);
+	conn->cookie = rc5_scramble(s->cookie_ctx, conn->cookie);
+
+	/*
+	 * There exists *exactly* one next_cookie value which yields 0x00000000,
+	 * and *exactly* one which yields 0xffffffff. Those values are reserved
+	 * for the initial key exchange, so just skip them.
+	 */
+
+	if (conn->cookie == SDVR_COOKIE_ZEROS ||
+	    conn->cookie == SDVR_COOKIE_ONES)
+		goto again;
+
 	rcu_read_lock();
-	cds_lfht_add_unique(s->connection_lfht, jhash32(conn->cookie),
-			    lfht_match_cookie, &conn->cookie, &conn->lfht_node);
+	ret = cds_lfht_add_unique(s->connection_lfht, conn->cookie,
+				  lfht_match_cookie, &conn->cookie,
+				  &conn->lfht_node);
 	rcu_read_unlock();
+
+	if (ret != &conn->lfht_node) {
+		err("Skipping in-use cookie value %08x\n", conn->cookie);
+		goto again;
+	}
 
 	return conn;
 }
@@ -1213,6 +1242,7 @@ int main(int argc, char **argv)
 	s.epoll_event_batch = 8;
 	s.listen_backlog = 1024;
 
+	BUG_ON(!(s.cookie_ctx = rc5_init()));
 	BUG_ON(getrandom(&s.next_cookie, sizeof(s.next_cookie), 0)
 	       != sizeof(s.next_cookie));
 
@@ -1274,16 +1304,3 @@ int main(int argc, char **argv)
 	rcu_unregister_thread();
 	return 0;
 }
-
-#if 0
-static inline int64_t mono_us(void)
-{
-	struct timespec t;
-
-	while (clock_gettime(CLOCK_MONOTONIC, &t))
-		log("Bad clock_gettime: %m\n");
-
-	return (int64_t)t.tv_nsec / 1000 + (int64_t)t.tv_sec * 1000000;
-}
-
-#endif
