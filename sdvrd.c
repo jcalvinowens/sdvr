@@ -724,26 +724,29 @@ static int dgram_ssetup(int sockfd, void *name, int namelen,
 	return sendmsg(sockfd, &msghdr, MSG_DONTWAIT) != sizeof(*tx);
 }
 
-static void stream_do_kx(struct server *s, struct connection *c, int fd,
-			 struct rxpiece *rxp)
+static int stream_do_kx(struct server *s, struct connection *c, int fd,
+			struct rxpiece *rxp)
 {
 	struct kx_msg_2 *m2 = (struct kx_msg_2 *)rxp->buf;
 	struct kx_msg_3 m3;
 	struct enckey *k;
 
 	k = kx_reply(m2, &m3, s->authkey, c->cookie);
-	if (!k)
-		fatal("Bad KX!\n");
+	if (!k) {
+		err("Bad KX! c=%08" PRIx32 "\n", c->cookie);
+		return -1;
+	}
 
 	c->key = k;
 	stream_kx_msg_3(fd, &m3);
 
 	rxp->record_off = 0;
 	rxp->record_len = SDVR_MACLEN + sizeof(struct client_setup_desc);
+	return 0;
 }
 
-static void do_one_recvmmsg(struct server *s, int fd, struct mmsghdr *mmsghdrs,
-			    int mmsghdrs_len)
+static int do_one_recvmmsg(struct server *s, int fd, struct mmsghdr *mmsghdrs,
+			   int mmsghdrs_len)
 {
 	int ret, i;
 
@@ -751,11 +754,11 @@ static void do_one_recvmmsg(struct server *s, int fd, struct mmsghdr *mmsghdrs,
 	ret = recvmmsg(fd, mmsghdrs, mmsghdrs_len, MSG_WAITFORONE, NULL);
 	rcu_thread_online();
 
-	if (ret == -1) {
+	if (ret <= 0) {
 		if (errno == EINTR)
-			return;
+			return 0;
 
-		fatal("Bad recvmmsg: %m\n");
+		return ret;
 	}
 
 	for (i = 0; i < ret; i++) {
@@ -854,6 +857,8 @@ static void do_one_recvmmsg(struct server *s, int fd, struct mmsghdr *mmsghdrs,
 		msg_hdr->msg_iov->iov_len = s->max_dgram_payload;
 		msg_hdr->msg_namelen = sizeof(struct sockaddr_any);
 	}
+
+	return 0;
 }
 
 static void *dgram_receive_thread(struct server *s, int dgram_fd)
@@ -881,8 +886,8 @@ static void *dgram_receive_thread(struct server *s, int dgram_fd)
 		rxp->iovec.iov_base = rxp->buf;
 	}
 
-	while (!s->stop)
-		do_one_recvmmsg(s, dgram_fd, mmsghdrs, s->dgram_mmsg_batch);
+	while (!s->stop &&
+	       !do_one_recvmmsg(s, dgram_fd, mmsghdrs, s->dgram_mmsg_batch));
 
 	close(dgram_fd);
 	rcu_unregister_thread();
@@ -924,6 +929,7 @@ static void drain_client_stream(struct server *s, struct connection *c)
 			 rxp->record_len - rxp->record_off, MSG_DONTWAIT);
 
 		if (r <= 0) {
+			// FIXME obvious starvation problem
 			if (errno == EAGAIN)
 				return;
 
@@ -940,7 +946,9 @@ static void drain_client_stream(struct server *s, struct connection *c)
 		rxp->iovec.iov_len = rxp->record_len;
 
 		if (!c->key) {
-			stream_do_kx(s, c, c->stream_sockfd, rxp);
+			if (stream_do_kx(s, c, c->stream_sockfd, rxp))
+				stop_client(s, c);
+
 			continue;
 		}
 
@@ -1041,7 +1049,8 @@ static void *stream_receive_thread(void *arg)
 			if (errno == EINTR)
 				continue;
 
-			fatal("Bad epoll: %m\n");
+			err("Bad epoll: %m\n");
+			break;
 		}
 
 		for (i = 0; i < r; i++) {
@@ -1080,7 +1089,6 @@ static void *stream_receive_thread(void *arg)
 static void *timer_thread(void *arg)
 {
 	struct server *s = arg;
-	struct pollfd p;
 	int timer_fd;
 
 	rcu_register_thread();
@@ -1090,24 +1098,30 @@ static void *timer_thread(void *arg)
 		fatal("Can't make timerfd: %m\n");
 
 	while (!s->stop) {
+		struct pollfd p;
 		uint64_t ticks;
+		int ret;
 
 		p.events = POLLIN;
 		p.fd = timer_fd;
 
 		rcu_thread_offline();
-		if (poll(&p, 1, -1) != 1) {
-			if (errno == EINTR)
-				continue;
-
-			fatal("Bad poll in timer thread: %m\n");
-		}
+		ret = poll(&p, 1, -1);
 		rcu_thread_online();
+
+		if (ret != 1) {
+			if (errno != EINTR)
+				err("Bad poll in timer thread: %m\n");
+
+			continue;
+		}
 
 		run_timers(s);
 
-		if (read(timer_fd, &ticks, 8) != 8)
-			fatal("Unable to read ticks: %m\n");
+		if (read(timer_fd, &ticks, 8) != 8) {
+			err("Unable to read ticks: %m\n");
+			continue;
+		}
 
 		if (ticks != 1)
 			err("Lost %" PRIu64 " ticks!\n", ticks - 1);
