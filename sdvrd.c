@@ -40,7 +40,6 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
-#include <sys/timerfd.h>
 #include <sys/mman.h>
 #include <sys/epoll.h>
 #include <sys/syscall.h>
@@ -66,32 +65,6 @@ static inline void sleep_us(int64_t us)
 
 	if (clock_nanosleep(CLOCK_MONOTONIC, 0, &t, NULL))
 		err("Bad nanosleep: %m\n");
-}
-
-static int new_tfd(int64_t interval_us)
-{
-	const struct itimerspec t = {
-		.it_interval = {
-			.tv_sec = interval_us / 1000000,
-			.tv_nsec = interval_us % 1000000 * 1000,
-		},
-		.it_value = {
-			.tv_sec = interval_us / 1000000,
-			.tv_nsec = interval_us % 1000000 * 1000,
-		},
-	};
-	int fd;
-
-	fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
-	if (fd == -1)
-		return -1;
-
-	if (timerfd_settime(fd, 0, &t, NULL)) {
-		close(fd);
-		return -1;
-	}
-
-	return fd;
 }
 
 /*
@@ -159,10 +132,8 @@ struct server {
 	int nr_udp_rx_threads;
 	pthread_t *ethernet_rx_threads;
 	int nr_ethernet_rx_threads;
-	pthread_t timer_thread;
 
 	const struct authkeypair *authkey;
-	int64_t timer_interval_us;
 	unsigned max_record_len;
 	unsigned max_dgram_payload;
 	int dgram_mmsg_batch;
@@ -959,14 +930,6 @@ static void drain_client_stream(struct server *s, struct connection *c)
 	}
 }
 
-static void run_timers(struct server *s)
-{
-	while (0) {
-		(void)*s;
-		rcu_quiescent_state();
-	}
-}
-
 static void accept_new_connections(struct server *s, int listen_fd)
 {
 	while (1) {
@@ -1086,53 +1049,6 @@ static void *stream_receive_thread(void *arg)
 	return NULL;
 }
 
-static void *timer_thread(void *arg)
-{
-	struct server *s = arg;
-	int timer_fd;
-
-	rcu_register_thread();
-
-	timer_fd = new_tfd(s->timer_interval_us);
-	if (timer_fd == -1)
-		fatal("Can't make timerfd: %m\n");
-
-	while (!s->stop) {
-		struct pollfd p;
-		uint64_t ticks;
-		int ret;
-
-		p.events = POLLIN;
-		p.fd = timer_fd;
-
-		rcu_thread_offline();
-		ret = poll(&p, 1, -1);
-		rcu_thread_online();
-
-		if (ret != 1) {
-			if (errno != EINTR)
-				err("Bad poll in timer thread: %m\n");
-
-			continue;
-		}
-
-		run_timers(s);
-
-		if (read(timer_fd, &ticks, 8) != 8) {
-			err("Unable to read ticks: %m\n");
-			continue;
-		}
-
-		if (ticks != 1)
-			err("Lost %" PRIu64 " ticks!\n", ticks - 1);
-
-	}
-
-	close(timer_fd);
-	rcu_unregister_thread();
-	return NULL;
-}
-
 static const struct authkeypair *get_selfkeys(void)
 {
 	const struct authkeypair *new;
@@ -1158,14 +1074,14 @@ static const struct authkeypair *get_selfkeys(void)
 	return new;
 }
 
-static void stopper(int nr)
+static void interrupter(int nr)
 {
-	fatal("Stopping: %d\n", nr);
+	(void)nr;
 }
 
-static const struct sigaction stopsig = {
-	.sa_flags = SA_RESETHAND,
-	.sa_handler = stopper,
+static const struct sigaction intsig = {
+	.sa_handler = interrupter,
+	.sa_flags = SA_NODEFER,
 };
 
 static const struct sigaction ignoresig = {
@@ -1220,12 +1136,13 @@ static void parse_args(int argc, char **argv, struct server *s)
 int main(int argc, char **argv)
 {
 	struct server s;
-	int i, nr_cpus;
+	int i, nr_threads;
+	sigset_t set;
 
 	rcu_register_thread();
 	sigaction(SIGPIPE, &ignoresig, NULL);
-	sigaction(SIGTERM, &stopsig, NULL);
-	sigaction(SIGINT, &stopsig, NULL);
+	sigaction(SIGTERM, &intsig, NULL);
+	sigaction(SIGINT, &intsig, NULL);
 
 	memset(&s, 0, sizeof(s));
 	s.bindaddr.in6.sin6_family = AF_INET6;
@@ -1249,7 +1166,6 @@ int main(int argc, char **argv)
 	}
 
 	s.authkey = get_selfkeys();
-	s.timer_interval_us = 60000000L;
 	s.max_record_len = 4096;
 	s.max_dgram_payload = 1024;
 	s.dgram_mmsg_batch = 64;
@@ -1278,24 +1194,25 @@ int main(int argc, char **argv)
 
 	pthread_mutex_init(&s.ring_dir_lock, NULL);
 
-	if (pthread_create(&s.timer_thread, NULL, timer_thread, &s))
-		fatal("Can't create dgram thread\n");
-
-	nr_cpus = 1; //sysconf(_SC_NPROCESSORS_ONLN);
-	if (nr_cpus == -1) {
+	nr_threads = 1; //sysconf(_SC_NPROCESSORS_ONLN);
+	if (nr_threads == -1) {
 		err("Can't get NPROCESSORS, assuming uniprocessor\n");
-		nr_cpus = 1;
+		nr_threads = 1;
 	}
 
-	s.stream_rx_threads = calloc(nr_cpus, sizeof(pthread_t));
-	s.udp_rx_threads = calloc(nr_cpus, sizeof(pthread_t));
-	s.ethernet_rx_threads = calloc(nr_cpus, sizeof(pthread_t));
 
-	s.nr_stream_rx_threads = nr_cpus;
-	s.nr_udp_rx_threads = nr_cpus;
-	s.nr_ethernet_rx_threads = nr_cpus;
+	s.stream_rx_threads = calloc(nr_threads, sizeof(pthread_t));
+	s.nr_stream_rx_threads = nr_threads;
 
-	for (i = 0; i < nr_cpus; i++) {
+	s.udp_rx_threads = calloc(nr_threads, sizeof(pthread_t));
+	s.nr_udp_rx_threads = nr_threads;
+
+	if (s.ifindex != -1) {
+		s.ethernet_rx_threads = calloc(nr_threads, sizeof(pthread_t));
+		s.nr_ethernet_rx_threads = nr_threads;
+	}
+
+	for (i = 0; i < nr_threads; i++) {
 		if (pthread_create(&s.stream_rx_threads[i], NULL,
 				   stream_receive_thread, &s))
 			fatal("Can't make stream thread\n");
@@ -1311,10 +1228,46 @@ int main(int argc, char **argv)
 	}
 
 	rcu_thread_offline();
-	while (1)
-		sleep(INT_MAX);
+	sigemptyset(&set);
+	sigaddset(&set, SIGTERM);
+	sigaddset(&set, SIGINT);
+	sigwait(&set, &i);
 	rcu_thread_online();
 
+	/*
+	 * If nothing is happening, the rx_threads will sit in their blocking
+	 * epoll_wait/recvmmsg calls and never see the stop flag. Signaling each
+	 * thread causes its blocking call to fail with -EINTR, so the stop flag
+	 * is observed and the thread exits.
+	 */
+	log("Stopping daemon\n");
+	s.stop = 1;
+
+	for (i = 0; i < s.nr_stream_rx_threads; i++) {
+		pthread_kill(s.stream_rx_threads[i], SIGTERM);
+		pthread_join(s.stream_rx_threads[i], NULL);
+	}
+	free(s.stream_rx_threads);
+	close(s.stream_epoll_fd);
+
+	for (i = 0; i < s.nr_udp_rx_threads; i++) {
+		pthread_kill(s.udp_rx_threads[i], SIGTERM);
+		pthread_join(s.udp_rx_threads[i], NULL);
+	}
+	free(s.udp_rx_threads);
+
+	for (i = 0; s.ifindex != -1 && i < s.nr_ethernet_rx_threads; i++) {
+		pthread_kill(s.ethernet_rx_threads[i], SIGTERM);
+		pthread_join(s.ethernet_rx_threads[i], NULL);
+	}
+	free(s.ethernet_rx_threads);
+	//FIXME walk connection_lfht
+	cds_lfht_destroy(s.connection_lfht, NULL);
+	munmap(s.ring_dir_mmap, 32768);
+	ftruncate(s.ring_dir_fd, 0);
+	close(s.ring_dir_fd);
+	free((void *)s.cookie_ctx);
+	free((void *)s.authkey);
 	rcu_unregister_thread();
 	return 0;
 }
