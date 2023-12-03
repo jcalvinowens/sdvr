@@ -32,6 +32,7 @@ disasm32: 32bit
 disasm32: disasm
 
 psdl.o: output.h
+prec.o: output.h
 
 sdvrc: sdvrc.o v4l2.o inet.o crypto.o
 	$(CC) -o $@ $^ $(CFLAGS) $(LDFLAGS)

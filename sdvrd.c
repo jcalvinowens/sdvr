@@ -63,7 +63,7 @@ static inline void sleep_us(int64_t us)
 	};
 
 	if (clock_nanosleep(CLOCK_MONOTONIC, 0, &t, NULL))
-		err("Bad nanosleep: %m\n");
+		warn("Bad nanosleep: %m\n");
 }
 
 /*
@@ -306,7 +306,7 @@ again:
 				  &conn->lfht_node);
 
 	if (ret != &conn->lfht_node) {
-		err("Skipping in-use cookie value %08x\n", conn->cookie);
+		warn("Skipping in-use cookie value %08x\n", conn->cookie);
 		goto again;
 	}
 
@@ -508,17 +508,17 @@ static int rxp_process_stream(struct server *s, struct connection *c,
 		c->rx_cdesc = true;
 
 		if (send_server_desc(c)) {
-			err("Can't send server desc: %m\n");
+			warn("Can't send server desc: %m\n");
 			return -1;
 		}
 
 		savedkey = get_clientpk(c->cdesc.name);
 		if (!savedkey)
 			if (save_clientpk(c->key, c->cdesc.name))
-				err("Can't save client key!\n");
+				warn("Can't save client key!\n");
 
 		if (savedkey && pk_cmp(c->key, savedkey)) {
-			err("Client key changed!\n");
+			warn("Client key changed!\n");
 			return -1;
 		}
 
@@ -695,7 +695,7 @@ static int stream_do_kx(struct server *s, struct connection *c, int fd,
 
 	k = kx_reply(m2, &m3, s->authkey, c->cookie);
 	if (!k) {
-		err("Bad KX! c=%08" PRIx32 "\n", c->cookie);
+		warn("Bad KX! c=%08" PRIx32 "\n", c->cookie);
 		return -1;
 	}
 
@@ -755,7 +755,7 @@ static int do_one_recvmmsg(struct server *s, int fd, struct mmsghdr *mmsghdrs,
 			kx_msg_2 = (void *)rxp->buf + sizeof(uint32_t);
 
 			if (kx_start_reply(kx_msg_2, s->authkey)) {
-				err("Bad KX!\n");
+				warn("Bad KX!\n");
 				continue;
 			}
 
@@ -763,7 +763,7 @@ static int do_one_recvmmsg(struct server *s, int fd, struct mmsghdr *mmsghdrs,
 
 			new = create_connection(s, false);
 			if (!new) {
-				err("No memory for new client!\n");
+				warn("No memory for new client!\n");
 				continue;
 			}
 
@@ -771,7 +771,7 @@ static int do_one_recvmmsg(struct server *s, int fd, struct mmsghdr *mmsghdrs,
 						   s->authkey, new->cookie);
 
 			if (!new->key) {
-				err("No memory for new key!\n");
+				warn("No memory for new key!\n");
 				stop_client(s, new);
 				continue;
 			}
@@ -799,7 +799,7 @@ static int do_one_recvmmsg(struct server *s, int fd, struct mmsghdr *mmsghdrs,
 
 			if (decrypt_one(&m->text, m->text_mac, sizeof(m->text),
 					c->key)) {
-				err("Bad client desc?\n");
+				warn("Bad client desc?\n");
 				continue;
 			}
 
@@ -937,20 +937,20 @@ static void accept_new_connections(struct server *s, int listen_fd)
 			if (errno == EAGAIN)
 				return;
 
-			err("Bad accept: %m\n");
+			warn("Bad accept: %m\n");
 			sleep_us(10);
 			continue;
 		}
 
 		if (stream_kx_msg_1(s, newfd)) {
-			err("Can't write PK: %m\n");
+			warn("Can't write PK: %m\n");
 			close(newfd);
 			continue;
 		}
 
 		new = create_connection(s, true);
 		if (!new) {
-			err("No memory for client\n");
+			warn("No memory for client\n");
 			close(newfd);
 			continue;
 		}
@@ -964,7 +964,7 @@ static void accept_new_connections(struct server *s, int listen_fd)
 		evt.data.u32 = new->cookie;
 		evt.events = EPOLLIN | EPOLLRDHUP | EPOLLET;
 		if (epoll_ctl(s->stream_epoll_fd, EPOLL_CTL_ADD, newfd, &evt)) {
-			err("Bad epoll_ctl: %m\n");
+			warn("Bad epoll_ctl: %m\n");
 			stop_client(s, new);
 		}
 	}
@@ -1003,7 +1003,7 @@ static void *stream_receive_thread(void *arg)
 			if (errno == EINTR)
 				continue;
 
-			err("Bad epoll: %m\n");
+			warn("Bad epoll: %m\n");
 			break;
 		}
 
@@ -1152,7 +1152,7 @@ int main(int argc, char **argv)
 		fatal("Can't make cookie rculfhash\n");
 
 	if (gethostname(s.server_name, sizeof(s.server_name))) {
-		err("Can't get hostname... using 'sdvr'\n");
+		warn("Can't get hostname... using 'sdvr'\n");
 		strcpy(s.server_name, "sdvr");
 	}
 
@@ -1187,7 +1187,7 @@ int main(int argc, char **argv)
 
 	nr_threads = 1; //sysconf(_SC_NPROCESSORS_ONLN);
 	if (nr_threads == -1) {
-		err("Can't get NPROCESSORS, assuming uniprocessor\n");
+		warn("Can't get NPROCESSORS, assuming uniprocessor\n");
 		nr_threads = 1;
 	}
 

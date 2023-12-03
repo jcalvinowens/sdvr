@@ -21,10 +21,11 @@
 #define S__LN__ S_(__LINE__)
 #define __log(...) do { fprintf(stderr, __VA_ARGS__); } while (0)
 #define log(...) do { __log(__FILE__ ":" S__LN__ ": " __VA_ARGS__); } while (0)
-#define err(...) do { log("ERROR: " __VA_ARGS__); } while (0)
+#define warn(...) do { log("WARNING: " __VA_ARGS__); } while (0)
 #define fatal(...) do { log("FATAL: " __VA_ARGS__); abort(); } while (0)
 
-#define BUG_ON(c) do { if (__builtin_expect(c, 0)) fatal(#c "\n"); } while (0)
+#define BUG_ON(c) \
+	do { if (__builtin_expect(c, 0)) fatal("BUG: " #c "\n"); } while (0)
 
 #define static_assert(expr, ...) __static_assert(expr, ##__VA_ARGS__, #expr)
 #define __static_assert(expr, msg, ...) _Static_assert(expr, msg)

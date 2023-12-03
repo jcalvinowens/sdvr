@@ -78,7 +78,7 @@ int get_stream_listen(const struct sockaddr_any *sa)
 
 	listen_fd = socket(sa->sa.sa_family, SOCK_STREAM, 0);
 	if (listen_fd == -1) {
-		err("Can't get listen socket: %m\n");
+		warn("Can't get listen socket: %m\n");
 		return -1;
 	}
 
@@ -88,17 +88,17 @@ int get_stream_listen(const struct sockaddr_any *sa)
 
 	v = 1;
 	if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &v, sizeof(v))) {
-		err("Can't set SO_REUSEADDR on socket: %m\n");
+		warn("Can't set SO_REUSEADDR on socket: %m\n");
 		goto err;
 	}
 
 	if (bind(listen_fd, (const struct sockaddr *)sa, sa_any_len(sa))) {
-		err("Bad bind: %m\n");
+		warn("Bad bind: %m\n");
 		goto err;
 	}
 
 	if (listen(listen_fd, 32)) {
-		err("Bad listen: %m\n");
+		warn("Bad listen: %m\n");
 		goto err;
 	}
 
@@ -119,7 +119,7 @@ int get_stream_listen_one(const struct sockaddr_any *sa)
 
 	nfd = accept(fd, NULL, NULL);
 	if (nfd == -1)
-		err("Bad accept: %m\n");
+		warn("Bad accept: %m\n");
 
 	close(fd);
 	return nfd;

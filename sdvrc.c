@@ -336,7 +336,7 @@ m1_rx_again:
 	pfd.fd = fd;
 	pfd.events = POLLIN;
 	if (poll(&pfd, 1, dgram_kx_rto_ms) != 1) {
-		err("Timeout waiting for kx_m1\n");
+		warn("Timeout waiting for kx_m1\n");
 		goto retransmit_hello;
 	}
 
@@ -383,7 +383,7 @@ m3_rx_again:
 	pfd.fd = fd;
 	pfd.events = POLLIN;
 	if (poll(&pfd, 1, dgram_kx_rto_ms) != 1) {
-		err("Timeout waiting for kx_m3...\n");
+		warn("Timeout waiting for kx_m3...\n");
 		goto retransmit_m2;
 	}
 
@@ -407,7 +407,7 @@ m3_rx_again:
 	}
 
 	if (kx_complete(enckey, authkeys, &m3.m3)) {
-		err("Bad KEX Response\n");
+		warn("Bad KEX Response\n");
 		goto m3_rx_again;
 	}
 
@@ -453,7 +453,7 @@ server_setup_rx_again:
 
 	if (decrypt_one_nonce((void *)&ssetup, mssetup.text_mac,
 			      sizeof(ssetup), enckey, mssetup.nonce)) {
-		err("Failed to decrypt server setup: corrupt?\n");
+		warn("Failed to decrypt server setup: corrupt?\n");
 		goto server_setup_rx_again;
 	}
 
@@ -637,7 +637,7 @@ int main(int argc, char **argv)
 	sigaction(SIGINT, &stopsig, NULL);
 
 	if (gethostname(hostname, sizeof(hostname))) {
-		err("No hostname, using 'sdvrc', pass a better name with -n\n");
+		warn("No hostname, using 'sdvrc', pass a better name with -n\n");
 		strcpy(hostname, "sdvrc");
 	}
 
