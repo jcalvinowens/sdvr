@@ -50,7 +50,6 @@
 #include <linux/videodev2.h>
 
 #include <urcu/urcu-qsbr.h>
-#include <urcu/map/urcu-qsbr.h>
 #include <urcu/rculfhash.h>
 #include <urcu/uatomic.h>
 
@@ -159,11 +158,9 @@ static struct connection *lookup_client(struct server *s, uint32_t cookie)
 	struct cds_lfht_node *node;
 	struct cds_lfht_iter iter;
 
-	rcu_read_lock();
 	cds_lfht_lookup(s->connection_lfht, cookie, lfht_match_cookie,
 			&cookie, &iter);
 	node = cds_lfht_iter_get_node(&iter);
-	rcu_read_unlock();
 
 	if (node == NULL)
 		return NULL;
@@ -188,16 +185,12 @@ static void destroy_client(struct rcu_head *head)
 
 static void stop_client(struct server *s, struct connection *conn)
 {
-	rcu_read_lock();
-
 	if (!cds_lfht_del(s->connection_lfht, &conn->lfht_node)) {
 		if (conn->stream_sockfd != -1)
 			shutdown(conn->stream_sockfd, SHUT_RDWR);
 
-		call_rcu(&conn->rcu, destroy_client);
+		urcu_qsbr_call_rcu(&conn->rcu, destroy_client);
 	}
-
-	rcu_read_unlock();
 }
 
 static void ring_init(struct server *s, struct connection *conn)
@@ -308,11 +301,9 @@ again:
 	    conn->cookie == SDVR_COOKIE_ONES)
 		goto again;
 
-	rcu_read_lock();
 	ret = cds_lfht_add_unique(s->connection_lfht, conn->cookie,
 				  lfht_match_cookie, &conn->cookie,
 				  &conn->lfht_node);
-	rcu_read_unlock();
 
 	if (ret != &conn->lfht_node) {
 		err("Skipping in-use cookie value %08x\n", conn->cookie);
@@ -721,9 +712,9 @@ static int do_one_recvmmsg(struct server *s, int fd, struct mmsghdr *mmsghdrs,
 {
 	int ret, i;
 
-	rcu_thread_offline();
+	urcu_qsbr_thread_offline();
 	ret = recvmmsg(fd, mmsghdrs, mmsghdrs_len, MSG_WAITFORONE, NULL);
-	rcu_thread_online();
+	urcu_qsbr_thread_online();
 
 	if (ret <= 0) {
 		if (errno == EINTR)
@@ -823,7 +814,7 @@ static int do_one_recvmmsg(struct server *s, int fd, struct mmsghdr *mmsghdrs,
 		}
 
 		rxp_process_dgram(c, rxp, msg_len);
-		rcu_quiescent_state();
+		urcu_qsbr_quiescent_state();
 
 		msg_hdr->msg_iov->iov_len = s->max_dgram_payload;
 		msg_hdr->msg_namelen = sizeof(struct sockaddr_any);
@@ -837,7 +828,7 @@ static void *dgram_receive_thread(struct server *s, int dgram_fd)
 	struct mmsghdr *mmsghdrs;
 	int i;
 
-	rcu_register_thread();
+	urcu_qsbr_register_thread();
 
 	mmsghdrs = alloca(sizeof(*mmsghdrs) * s->dgram_mmsg_batch);
 	for (i = 0; i < s->dgram_mmsg_batch; i++) {
@@ -861,7 +852,7 @@ static void *dgram_receive_thread(struct server *s, int dgram_fd)
 	       !do_one_recvmmsg(s, dgram_fd, mmsghdrs, s->dgram_mmsg_batch));
 
 	close(dgram_fd);
-	rcu_unregister_thread();
+	urcu_qsbr_unregister_thread();
 	return NULL;
 }
 
@@ -985,7 +976,7 @@ static void *stream_receive_thread(void *arg)
 	struct server *s = arg;
 	int listen_fd;
 
-	rcu_register_thread();
+	urcu_qsbr_register_thread();
 
 	listen_fd = get_stream_listen(&s->bindaddr);
 	if (listen_fd == -1)
@@ -1003,10 +994,10 @@ static void *stream_receive_thread(void *arg)
 	while (!s->stop) {
 		int r, i;
 
-		rcu_thread_offline();
+		urcu_qsbr_thread_offline();
 		r = epoll_wait(s->stream_epoll_fd, evts,
 			       s->epoll_event_batch, -1);
-		rcu_thread_online();
+		urcu_qsbr_thread_online();
 
 		if (r <= 0) {
 			if (errno == EINTR)
@@ -1040,12 +1031,12 @@ static void *stream_receive_thread(void *arg)
 				continue;
 
 			drain_client_stream(s, c);
-			rcu_quiescent_state();
+			urcu_qsbr_quiescent_state();
 		}
 	}
 
 	close(listen_fd);
-	rcu_unregister_thread();
+	urcu_qsbr_unregister_thread();
 	return NULL;
 }
 
@@ -1139,7 +1130,7 @@ int main(int argc, char **argv)
 	int i, nr_threads;
 	sigset_t set;
 
-	rcu_register_thread();
+	urcu_qsbr_register_thread();
 	sigaction(SIGPIPE, &ignoresig, NULL);
 	sigaction(SIGTERM, &intsig, NULL);
 	sigaction(SIGINT, &intsig, NULL);
@@ -1227,12 +1218,12 @@ int main(int argc, char **argv)
 				fatal("Can't make stream thread\n");
 	}
 
-	rcu_thread_offline();
+	urcu_qsbr_thread_offline();
 	sigemptyset(&set);
 	sigaddset(&set, SIGTERM);
 	sigaddset(&set, SIGINT);
 	sigwait(&set, &i);
-	rcu_thread_online();
+	urcu_qsbr_thread_online();
 
 	/*
 	 * If nothing is happening, the rx_threads will sit in their blocking
@@ -1268,6 +1259,6 @@ int main(int argc, char **argv)
 	close(s.ring_dir_fd);
 	free((void *)s.cookie_ctx);
 	free((void *)s.authkey);
-	rcu_unregister_thread();
+	urcu_qsbr_unregister_thread();
 	return 0;
 }
