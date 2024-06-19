@@ -14,7 +14,7 @@
  * GNU General Public License for more details.
  */
 
-#include "common.h"
+#include "internal.h"
 #include "inet.h"
 
 #include <stdlib.h>

@@ -14,6 +14,7 @@
  * GNU General Public License for more details.
  */
 
+#include "internal.h"
 #include "common.h"
 #include "proto.h"
 #include "crypto.h"
@@ -161,48 +162,6 @@ static void run_stream_tx(struct v4l2_dev *dev, struct enckey *k, FILE *tx,
 	}
 }
 
-static int save_serverpk(const struct enckey *k, const char *name)
-{
-	char path[4096];
-
-	snprintf(path, sizeof(path), "%s/.sdvr/%s.spk", getenv("HOME"), name);
-	return crypto_save_pk(k, path);
-}
-
-static const struct authpubkey *get_serverpk(const char *name)
-{
-	char path[4096];
-
-	snprintf(path, sizeof(path), "%s/.sdvr/%s.spk", getenv("HOME"), name);
-	if (!access(path, R_OK))
-		return crypto_open_pk(path);
-
-	return NULL;
-}
-
-static const struct authkeypair *get_selfkeys(const char *name)
-{
-	const struct authkeypair *new;
-	char *tmp, path[4096];
-
-	snprintf(path, sizeof(path), "%s/.sdvr/%s.key", getenv("HOME"), name);
-	if (!access(path, R_OK))
-		return crypto_open_key(path);
-
-	tmp = rindex(path, '/');
-	*tmp = '\0';
-	if (access(path, F_OK))
-		if (mkdir(path, 0700))
-			fprintf(stderr, "Can't mkdir ~/.sdvr!\n");
-	*tmp = '/';
-
-	new = crypto_open_key(NULL);
-	if (crypto_save_key(new, path))
-		fprintf(stderr, "Unable to save key!\n");
-
-	return new;
-}
-
 static int enc_main_stream(void)
 {
 	const struct authpubkey *remotekey;
@@ -240,7 +199,7 @@ static int enc_main_stream(void)
 	if (!remotekey)
 		fatal("No memory for PK!\n");
 
-	authkeys = get_selfkeys(setup.name);
+	authkeys = get_selfkeys("%s/.sdvr/%s.key", getenv("HOME"), setup.name);
 	enckey = kx_begin(&m2, authkeys, remotekey);
 	if (!enckey)
 		fatal("Bad KEX\n");
@@ -363,7 +322,7 @@ m1_rx_again:
 	if (!remotekey)
 		fatal("No memory for PK!\n");
 
-	authkeys = get_selfkeys(setup.name);
+	authkeys = get_selfkeys("%s/.sdvr/%s.key", getenv("HOME"), setup.name);
 	enckey = kx_begin(&m2.m2, authkeys, remotekey);
 	if (!enckey)
 		fatal("No memory for KEX\n");

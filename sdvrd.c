@@ -17,6 +17,7 @@
 #include "proto.h"
 #include "ring.h"
 
+#include "internal.h"
 #include "common.h"
 #include "crypto.h"
 #include "inet.h"
@@ -466,25 +467,6 @@ static int send_server_desc(struct connection *c)
 
 	encrypt_one(tmp, &c->sdesc, sizeof(c->sdesc), c->key);
 	return sendmsg(c->stream_sockfd, &msghdr, MSG_DONTWAIT) != sizeof(tmp);
-}
-
-static int save_clientpk(const struct enckey *k, const char *name)
-{
-	char path[4096];
-
-	snprintf(path, sizeof(path), "%s/.sdvr/%s.cpk", getenv("HOME"), name);
-	return crypto_save_pk(k, path);
-}
-
-static const struct authpubkey *get_clientpk(const char *name)
-{
-	char path[4096];
-
-	snprintf(path, sizeof(path), "%s/.sdvr/%s.cpk", getenv("HOME"), name);
-	if (!access(path, R_OK))
-		return crypto_open_pk(path);
-
-	return NULL;
 }
 
 static int rxp_process_stream(struct server *s, struct connection *c,
@@ -1040,31 +1022,6 @@ static void *stream_receive_thread(void *arg)
 	return NULL;
 }
 
-static const struct authkeypair *get_selfkeys(void)
-{
-	const struct authkeypair *new;
-	char *tmp, path[4096];
-
-	snprintf(path, sizeof(path), "%s/.sdvr/sdvrdkey", getenv("HOME"));
-	if (!access(path, R_OK))
-		return crypto_open_key(path);
-
-	log("No key found, making new one...\n");
-
-	tmp = rindex(path, '/');
-	*tmp = '\0';
-	if (access(path, F_OK))
-		if (mkdir(path, 0700))
-			fprintf(stderr, "Can't mkdir ~/.sdvr!\n");
-	*tmp = '/';
-
-	new = crypto_open_key(NULL);
-	if (crypto_save_key(new, path))
-		fprintf(stderr, "Unable to save key!\n");
-
-	return new;
-}
-
 static void interrupter(int nr)
 {
 	(void)nr;
@@ -1156,7 +1113,7 @@ int main(int argc, char **argv)
 		strcpy(s.server_name, "sdvr");
 	}
 
-	s.authkey = get_selfkeys();
+	s.authkey = get_selfkeys("%s/.sdvr/sdvrdkey", getenv("HOME"));
 	s.max_record_len = 4096;
 	s.max_dgram_payload = 1024;
 	s.dgram_mmsg_batch = 64;

@@ -25,7 +25,7 @@ debug32: 32bit
 32bit: all
 
 disasm: CFLAGS += -fverbose-asm
-disasm: sdvrd.s sdvrc.s inet.s crypto.s v4l2.s rc5.s
+disasm: sdvrd.s sdvrc.s inet.s crypto.s v4l2.s rc5.s common.s
 disasm: all
 
 disasm32: 32bit
@@ -34,10 +34,10 @@ disasm32: disasm
 psdl.o: output.h
 prec.o: output.h
 
-sdvrc: sdvrc.o v4l2.o inet.o crypto.o
+sdvrc: sdvrc.o v4l2.o inet.o crypto.o common.o
 	$(CC) -o $@ $^ $(CFLAGS) $(LDFLAGS)
 
-sdvrd: sdvrd.o crypto.o inet.o rc5.o
+sdvrd: sdvrd.o crypto.o inet.o rc5.o common.o
 	$(CC) -o $@ $^ $(CFLAGS) $(LDFLAGS)
 
 tests: tests.o crypto.o rc5.o

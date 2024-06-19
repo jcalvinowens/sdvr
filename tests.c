@@ -14,7 +14,7 @@
  * GNU General Public License for more details.
  */
 
-#include "common.h"
+#include "internal.h"
 #include "crypto.h"
 #include "proto.h"
 #include "rc5.h"
@@ -42,8 +42,8 @@ static void test_crypto(void)
 	struct kx_msg_2 m2;
 	struct kx_msg_3 m3;
 
-	a_1 = crypto_open_key(NULL);
-	a_2 = crypto_open_key(NULL);
+	a_1 = crypto_import_key(NULL);
+	a_2 = crypto_import_key(NULL);
 
 	k1 = kx_begin(&m2, a_1, authkeypair_apk(a_2));
 	if (!k1)

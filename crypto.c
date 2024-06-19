@@ -15,7 +15,7 @@
  */
 
 #include "crypto.h"
-#include "common.h"
+#include "internal.h"
 #include "proto.h"
 
 #include <stdlib.h>
@@ -23,11 +23,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
-#include <errno.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <sys/types.h>
-#include <sys/stat.h>
 #include <sys/random.h>
 
 #include <nacl/crypto_scalarmult_curve25519.h>
@@ -133,6 +128,37 @@ int pk_cmp(const struct enckey *k, const struct authpubkey *p)
 	return memcmp(k->remote.pk, p->pk, crypto_box_PUBLICKEYBYTES);
 }
 
+static const char hexkey_fmt[] = "%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx"
+				 "%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx"
+				 "%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx"
+				 "%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx";
+
+static int __import_hexkey(const char *hexkey, uint8_t *out)
+{
+	return sscanf(hexkey, hexkey_fmt,
+		     out +  0, out +  1, out +  2, out + 3,
+		     out +  4, out +  5, out +  6, out + 7,
+		     out +  8, out +  9, out + 10, out + 11,
+		     out + 12, out + 13, out + 14, out + 15,
+		     out + 16, out + 17, out + 18, out + 19,
+		     out + 20, out + 21, out + 22, out + 23,
+		     out + 24, out + 25, out + 26, out + 27,
+		     out + 28, out + 29, out + 30, out + SDVR_PKLEN - 1);
+}
+
+static void __export_hexkey(const uint8_t *in, char *out)
+{
+	snprintf(out, SDVR_PKLEN * 2 + 1, hexkey_fmt,
+		 in[ 0], in[ 1], in[ 2], in[ 3],
+		 in[ 4], in[ 5], in[ 6], in[ 7],
+		 in[ 8], in[ 9], in[10], in[11],
+		 in[12], in[13], in[14], in[15],
+		 in[16], in[17], in[18], in[19],
+		 in[20], in[21], in[22], in[23],
+		 in[24], in[25], in[26], in[27],
+		 in[28], in[29], in[30], in[SDVR_PKLEN - 1]);
+}
+
 const struct authpubkey *new_apk(const uint8_t *pk)
 {
 	struct authpubkey *r = calloc(1, sizeof(struct authpubkey));
@@ -149,23 +175,18 @@ const uint8_t *__pk(const struct authpubkey *p)
 	return (const uint8_t *)p->pk;
 }
 
-const struct authkeypair *crypto_open_key(const char *path)
+const struct authkeypair *crypto_import_key(const char *hexkey)
 {
 	struct authkeypair *ret = malloc(sizeof(*ret));
-	int fd;
 
 	if (!ret)
 		return NULL;
 
-	if (path) {
-		fd = open(path, O_RDONLY);
-		if (fd == -1)
-			goto err1;
-
-		if (read(fd, ret->sk, sizeof(ret->sk)) != sizeof(ret->sk))
-			goto err2;
-
-		close(fd);
+	if (hexkey) {
+		if (__import_hexkey(hexkey, ret->sk) != sizeof(ret->sk)) {
+			free(ret);
+			return NULL;
+		}
 
 	} else {
 		__randombytes(ret->sk, sizeof(ret->sk), GRND_RANDOM);
@@ -173,69 +194,43 @@ const struct authkeypair *crypto_open_key(const char *path)
 
 	crypto_scalarmult_curve25519_base(ret->apk.pk, ret->sk);
 	return ret;
-
-err2:
-	close(fd);
-err1:
-	free(ret);
-	return NULL;
 }
 
-int crypto_save_key(const struct authkeypair *k, const char *path)
+const char *crypto_export_key(const struct authkeypair *k)
 {
-	int fd, r = 0;
-
-	fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
-	if (fd == -1)
-		return -1;
-
-	if (write(fd, k->sk, sizeof(k->sk)) != sizeof(k->sk))
-		r = -1;
-
-	fchmod(fd, S_IRUSR);
-	close(fd);
-	return r;
-}
-
-const struct authpubkey *crypto_open_pk(const char *path)
-{
-	struct authpubkey *ret = malloc(sizeof(*ret));
-	int fd;
+	char *ret = malloc(sizeof(k->sk) * 2 + 1);
 
 	if (!ret)
 		return NULL;
 
-	fd = open(path, O_RDONLY);
-	if (fd == -1)
-		goto err;
-
-	if (read(fd, ret->pk, sizeof(ret->pk)) != sizeof(ret->pk))
-		goto err2;
-
-	close(fd);
+	__export_hexkey(k->sk, ret);
 	return ret;
-
-err2:
-	close(fd);
-err:
-	free(ret);
-	return NULL;
 }
 
-int crypto_save_pk(const struct enckey *k, const char *path)
+const struct authpubkey *crypto_import_pk(const char *hex_pubkey)
 {
-	int fd, r = 0;
+	struct authpubkey *ret = malloc(sizeof(*ret));
 
-	fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
-	if (fd == -1)
-		return -1;
+	if (!ret)
+		return NULL;
 
-	if (write(fd, k->remote.pk, sizeof(k->remote.pk)) != sizeof(k->remote.pk))
-		r = -1;
+	if (__import_hexkey(hex_pubkey, ret->pk) != sizeof(ret->pk)) {
+		free(ret);
+		return NULL;
+	}
 
-	fchmod(fd, S_IRUSR | S_IRGRP | S_IROTH);
-	close(fd);
-	return r;
+	return ret;
+}
+
+const char *crypto_export_pk(const struct enckey *k)
+{
+	char *ret = malloc(sizeof(k->remote.pk) * 2 + 1);
+
+	if (!ret)
+		return NULL;
+
+	__export_hexkey(k->remote.pk, ret);
+	return ret;
 }
 
 static struct enckey *__kx_initial(const uint8_t *remote_pk,

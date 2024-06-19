@@ -9,11 +9,11 @@ struct authkeypair;
 struct authpubkey;
 struct enckey;
 
-const struct authkeypair *crypto_open_key(const char *path);
-const struct authpubkey *crypto_open_pk(const char *path);
+const struct authkeypair *crypto_import_key(const char *hexkey);
+const char *crypto_export_key(const struct authkeypair *k);
 
-int crypto_save_key(const struct authkeypair *k, const char *path);
-int crypto_save_pk(const struct enckey *k, const char *path);
+const struct authpubkey *crypto_import_pk(const char *hexpubkey);
+const char *crypto_export_pk(const struct enckey *k);
 
 int pk_cmp(const struct enckey *k, const struct authpubkey *p);
 const struct authpubkey *authkeypair_apk(const struct authkeypair *ak);

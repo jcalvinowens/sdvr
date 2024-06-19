@@ -1,31 +1,12 @@
 #pragma once
 
-#define min(x, y) ({							\
-	typeof(x) _min1 = (x);						\
-	typeof(y) _min2 = (y);						\
-	(void) (&_min1 == &_min2);					\
-	_min1 < _min2 ? _min1 : _min2; })
+#include <stdarg.h>
 
-#define max(x, y) ({							\
-	typeof(x) _max1 = (x);						\
-	typeof(y) _max2 = (y);						\
-	(void) (&_max1 == &_max2);					\
-	_max1 > _max2 ? _max1 : _max2; })
+#include "crypto.h"
 
-#define container_of(ptr, type, member) ({				\
-	const typeof( ((type *)0)->member ) *__mptr = (ptr);		\
-	(type *)( (char *)__mptr - __builtin_offsetof(type,member) );})
+const struct authkeypair *get_selfkeys(const char *fmt, ...);
 
-#define S(x) #x
-#define S_(x) S(x)
-#define S__LN__ S_(__LINE__)
-#define __log(...) do { fprintf(stderr, __VA_ARGS__); } while (0)
-#define log(...) do { __log(__FILE__ ":" S__LN__ ": " __VA_ARGS__); } while (0)
-#define warn(...) do { log("WARNING: " __VA_ARGS__); } while (0)
-#define fatal(...) do { log("FATAL: " __VA_ARGS__); abort(); } while (0)
-
-#define BUG_ON(c) \
-	do { if (__builtin_expect(c, 0)) fatal("BUG: " #c "\n"); } while (0)
-
-#define static_assert(expr, ...) __static_assert(expr, ##__VA_ARGS__, #expr)
-#define __static_assert(expr, msg, ...) _Static_assert(expr, msg)
+const struct authpubkey *get_clientpk(const char *name);
+int save_clientpk(const struct enckey *k, const char *name);
+const struct authpubkey *get_serverpk(const char *name);
+int save_serverpk(const struct enckey *k, const char *name);
