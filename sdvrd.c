@@ -176,6 +176,7 @@ static void destroy_client(struct rcu_head *head)
 	if (conn->stream_sockfd != -1)
 		close(conn->stream_sockfd);
 
+	free(conn->stream_next);
 	munmap(conn->client->ring_mmap, conn->client->ring_size);
 	ftruncate(conn->client->ring_fd, 0);
 	close(conn->client->ring_fd);
